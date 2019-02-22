@@ -40,11 +40,9 @@ impl Decoder for PlainDecoder {
             .into_body()
             .map_err(|e| Error::with_chain(e, "Failed to read a chunk"))
             .for_each(move |chunk| {
-                match file.write_all(&chunk)
-                    .chain_err(|| "Failed to write a chunk") {
-                    Ok(()) => Box::new(ok(())),
-                    Err(e) => Box::new(failed(e)),
-                }
+                try_future!(file.write_all(&chunk)
+                    .chain_err(|| "Failed to write a chunk"));
+                Box::new(ok(()))
             }))
     }
 }
@@ -63,11 +61,8 @@ impl Decoder for XzDecoder {
         let body = response
             .into_body()
             .map_err(|e| Error::with_chain(e, "Failed to read a chunk"));
-        let mut xz = match xz2::stream::Stream::new_stream_decoder(std::u64::MAX, 0)
-            .chain_err(|| "Failed to create an xz2::stream::Stream") {
-            Ok(t) => t,
-            Err(e) => return Box::new(failed(e)),
-        };
+        let mut xz = try_future!(xz2::stream::Stream::new_stream_decoder(std::u64::MAX, 0)
+            .chain_err(|| "Failed to create an xz2::stream::Stream"));
         Box::new(body.for_each(move |chunk| {
             let end = xz.total_in() as usize + chunk.len();
             let mut buf = Vec::with_capacity(8192);
@@ -75,16 +70,10 @@ impl Decoder for XzDecoder {
                 let remaining = end - xz.total_in() as usize;
                 let remaining_bytes = &chunk[chunk.len() - remaining..chunk.len()];
                 buf.clear();
-                match xz.process_vec(remaining_bytes, &mut buf, xz2::stream::Action::Run)
-                    .chain_err(|| "Failed to decompress a chunk") {
-                    Ok(_) => {}
-                    Err(e) => return Box::new(failed(e)),
-                };
-                match file.write_all(&buf)
-                    .chain_err(|| "Failed to write a chunk") {
-                    Ok(()) => {}
-                    Err(e) => return Box::new(failed(e)),
-                };
+                try_future!(xz.process_vec(remaining_bytes, &mut buf, xz2::stream::Action::Run)
+                    .chain_err(|| "Failed to decompress a chunk"));
+                try_future!(file.write_all(&buf)
+                    .chain_err(|| "Failed to write a chunk"));
             }
             Box::new(ok(()))
         }))

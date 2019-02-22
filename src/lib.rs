@@ -12,8 +12,9 @@ extern crate serde_derive;
 extern crate serde_xml_rs;
 extern crate sha2;
 
-pub mod decoders;
+#[macro_use]
 pub mod errors;
+pub mod decoders;
 pub mod fs;
 pub mod hashes;
 pub mod http;

@@ -5,6 +5,7 @@ extern crate dotenv;
 extern crate error_chain;
 extern crate futures;
 extern crate hyper;
+#[macro_use]
 extern crate index_repo;
 extern crate tempfile;
 extern crate xz2;
@@ -81,24 +82,17 @@ fn fetch_repomd_data(client: &http::Client, repo_uri: &str, data: &repomd::Data)
                      -> Box<Future<Item=PathBuf, Error=Error> + Send> {
     let decoder = Decoder::new(&data.location.href);
     let path = decoder.path().to_owned();
-    let open_checksum = match &data.open_checksum {
-        Some(t) => t,
-        None => return Box::new(failed("Missing <open-checksum>".into())),
-    };
+    let open_checksum = try_future!(data.open_checksum
+        .as_ref()
+        .ok_or_else(|| "Missing <open-checksum>".into()));
     if let Ok(hexdigest) = hashes::hexdigest_path(&path, &open_checksum.tpe) {
         if hexdigest == open_checksum.hexdigest {
             return Box::new(ok(path));
         }
     };
     let uri_str = repo_uri.to_owned() + "/" + &data.location.href;
-    let uri = match uri_str.parse().chain_err(|| format!("Malformed URI: {}", uri_str)) {
-        Ok(t) => t,
-        Err(e) => return Box::new(failed(e)),
-    };
-    let file = match create_file_all(&path) {
-        Ok(t) => t,
-        Err(e) => return Box::new(failed(e)),
-    };
+    let uri = try_future!(uri_str.parse().chain_err(|| format!("Malformed URI: {}", uri_str)));
+    let file = try_future!(create_file_all(&path));
     Box::new(http::checked_fetch(client, &uri)
         .and_then(move |response| { decoder.decode_response(file, response) })
         .and_then(|()| ok(path)))
@@ -124,48 +118,30 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         .map(|x| x.to_owned())
         .or_else(|| { env::var("DATABASE_URL").ok() })
         .unwrap_or_else(|| "index.sqlite".to_owned());
-    let conn = match SqliteConnection::establish(&database_url)
-        .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)) {
-        Ok(t) => t,
-        Err(e) => return Box::new(failed(e)),
-    };
+    let conn = try_future!(SqliteConnection::establish(&database_url)
+        .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)));
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
-    let repomd_uri = match repomd_uri_str.parse()
-        .chain_err(|| format!("Malformed URI: {}", repomd_uri_str)) {
-        Ok(t) => t,
-        Err(e) => return Box::new(failed(e)),
-    };
-    let client = match http::make_client() {
-        Ok(t) => t,
-        Err(e) => return Box::new(failed(e)),
-    };
+    let repomd_uri = try_future!(repomd_uri_str.parse()
+        .chain_err(|| format!("Malformed URI: {}", repomd_uri_str)));
+    let client = try_future!(http::make_client());
     Box::new(fetch_repomd(&client, &repomd_uri)
         .and_then({
             let repo_uri = repo_uri.to_owned();
             move |doc| -> Box<Future<Item=PathBuf, Error=Error> + Send> {
-                let primary_db_data = match get_primary_db(&doc) {
-                    Some(t) => t,
-                    None => return Box::new(failed(
-                        r#"Missing <data type="primary_db">"#.into())),
-                };
-                if let Err(e) = persist_repomd(&conn, &repo_uri, &primary_db_data) {
-                    return Box::new(failed(e));
-                }
+                let primary_db_data = try_future!(get_primary_db(&doc)
+                    .ok_or_else(|| r#"Missing <data type="primary_db">"#.into()));
+                try_future!(persist_repomd(&conn, &repo_uri, &primary_db_data));
                 fetch_repomd_data(&client, &repo_uri, &primary_db_data)
             }
         })
         .and_then(|path| {
-            let database_url = "file:".to_owned() + match path.to_str() {
-                Some(t) => t,
-                None => return Box::new(failed(format!(
-                    "Malformed path: {:?}", path).into())),
-            } + "?mode=ro";
-            let _conn = match SqliteConnection::establish(&database_url)
+            let database_url = "file:".to_owned() +
+                try_future!(path.to_str()
+                    .ok_or_else(|| format!("Malformed path: {:?}", path).into())) +
+                "?mode=ro";
+            let _conn = try_future!(SqliteConnection::establish(&database_url)
                 .chain_err(|| format!(
-                    "SqliteConnection::establish({}) failed", database_url)) {
-                Ok(t) => t,
-                Err(e) => return Box::new(failed(e)),
-            };
+                    "SqliteConnection::establish({}) failed", database_url)));
             Box::new(ok(()))
         }))
 }

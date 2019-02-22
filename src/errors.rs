@@ -9,6 +9,16 @@ error_chain! {
     }
 }
 
+#[macro_export]
+macro_rules! try_future {
+    ( $x:expr ) => {
+        match $x {
+            Ok(t) => t,
+            Err(e) => return Box::new(failed(e)),
+        }
+    }
+}
+
 // https://github.com/rust-lang-nursery/error-chain/issues/90#issuecomment-280703711
 
 pub type SFuture<T> = Box<Future<Item=T, Error=Error> + Send>;
