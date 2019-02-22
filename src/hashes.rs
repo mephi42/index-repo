@@ -29,7 +29,7 @@ pub fn hexdigest_path(path: &Path, hash_type: &str) -> Result<String> {
 fn hexdigest_file_1<H>(mut file: File, mut hash: H) -> Result<String> where H: Hash {
     let mut buf = [0 as u8; 8192];
     loop {
-        let n = file.read(&mut buf).chain_err(|| format!("File::read() failed"))?;
+        let n = file.read(&mut buf).chain_err(|| "File::read() failed")?;
         if n == 0 {
             break Ok(hash.hexdigest());
         }

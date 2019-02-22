@@ -28,8 +28,9 @@ use index_repo::errors::*;
 use index_repo::fs::create_file_all;
 use index_repo::hashes;
 use index_repo::http;
-use index_repo::models::Repo;
+use index_repo::models::*;
 use index_repo::repomd;
+use index_repo::schema::*;
 
 fn fetch_repomd(client: &http::Client, repomd_uri: &hyper::Uri)
                 -> impl Future<Item=repomd::Document, Error=Error> {
@@ -47,30 +48,25 @@ fn fetch_repomd(client: &http::Client, repomd_uri: &hyper::Uri)
         .and_then(|body| done(repomd::Document::parse(body.reader())))
 }
 
-fn get_primary_db(doc: &repomd::Document) -> Option<&repomd::Data> {
-    doc.data.iter().find(|data| data.tpe == "primary_db")
-}
-
 fn persist_repomd(conn: &SqliteConnection, repo_uri: &str, primary_db_data: &repomd::Data)
                   -> Result<()> {
-    use index_repo::schema::repos::dsl::*;
     conn.transaction(|| {
-        let repo_vec = repos
-            .filter(uri.eq(repo_uri))
+        let repo_vec = repos::table
+            .filter(repos::uri.eq(repo_uri))
             .limit(1)
             .load::<Repo>(conn)
             .chain_err(|| "Failed to query repo by uri")?;
         match repo_vec.first() {
             Some(repo) =>
-                diesel::update(repos.filter(id.eq(repo.id)))
-                    .set(primary_db.eq(&primary_db_data.location.href))
+                diesel::update(repos::table.filter(repos::id.eq(repo.id)))
+                    .set(repos::primary_db.eq(&primary_db_data.location.href))
                     .execute(conn)
                     .chain_err(|| "Failed to update repo")?,
             None =>
-                diesel::insert_into(repos)
+                diesel::insert_into(repos::table)
                     .values((
-                        uri.eq(repo_uri),
-                        primary_db.eq(&primary_db_data.location.href)))
+                        repos::uri.eq(repo_uri),
+                        repos::primary_db.eq(&primary_db_data.location.href)))
                     .execute(conn)
                     .chain_err(|| "Failed to insert repo")?,
         };
@@ -80,7 +76,7 @@ fn persist_repomd(conn: &SqliteConnection, repo_uri: &str, primary_db_data: &rep
 
 fn fetch_repomd_data(client: &http::Client, repo_uri: &str, data: &repomd::Data)
                      -> Box<Future<Item=PathBuf, Error=Error> + Send> {
-    let decoder = Decoder::new(&data.location.href);
+    let decoder = Decoder::from_href(&data.location.href);
     let path = decoder.path().to_owned();
     let open_checksum = try_future!(data.open_checksum
         .as_ref()
@@ -106,18 +102,22 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         .about(env!("CARGO_PKG_DESCRIPTION"))
         .arg(Arg::with_name("DATABASE_URL")
             .long("database-url")
-            .takes_value(true)
-            .global(true))
+            .takes_value(true))
+        .arg(Arg::with_name("ARCH")
+            .long("arch")
+            .number_of_values(1)
+            .multiple(true))
         .arg(Arg::with_name("URI")
             .required(true)
             .index(1))
         .get_matches();
-    let repo_uri = matches.value_of("URI").unwrap();
     let database_url = matches
         .value_of("DATABASE_URL")
         .map(|x| x.to_owned())
         .or_else(|| { env::var("DATABASE_URL").ok() })
         .unwrap_or_else(|| "index.sqlite".to_owned());
+    let arches = matches.values_of_lossy("ARCH");
+    let repo_uri = matches.value_of("URI").unwrap();
     let conn = try_future!(SqliteConnection::establish(&database_url)
         .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)));
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
@@ -128,7 +128,9 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         .and_then({
             let repo_uri = repo_uri.to_owned();
             move |doc| -> Box<Future<Item=PathBuf, Error=Error> + Send> {
-                let primary_db_data = try_future!(get_primary_db(&doc)
+                let primary_db_data = try_future!(doc.data
+                    .iter()
+                    .find(|data| data.tpe == "primary_db")
                     .ok_or_else(|| r#"Missing <data type="primary_db">"#.into()));
                 try_future!(persist_repomd(&conn, &repo_uri, &primary_db_data));
                 fetch_repomd_data(&client, &repo_uri, &primary_db_data)
@@ -139,9 +141,16 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
                 try_future!(path.to_str()
                     .ok_or_else(|| format!("Malformed path: {:?}", path).into())) +
                 "?mode=ro";
-            let _conn = try_future!(SqliteConnection::establish(&database_url)
+            let conn = try_future!(SqliteConnection::establish(&database_url)
                 .chain_err(|| format!(
                     "SqliteConnection::establish({}) failed", database_url)));
+            let mut query = index_repo::schema::packages::table.into_boxed();
+            if let Some(arches) = arches {
+                query = query.filter(index_repo::schema::packages::arch.eq_any(arches));
+            }
+            let packages = try_future!(query.load::<Package>(&conn)
+                .chain_err(|| "Failed to query packages"));
+            eprintln!("{} package(s)", packages.len());
             Box::new(ok(()))
         }))
 }

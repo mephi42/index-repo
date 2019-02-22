@@ -16,7 +16,7 @@ pub trait Decoder {
 }
 
 impl Decoder {
-    pub fn new(href: &str) -> Box<Decoder + Send> {
+    pub fn from_href(href: &str) -> Box<Decoder + Send> {
         if href.ends_with(".xz") {
             Box::new(XzDecoder { path: PathBuf::from(&href[0..href.len() - 3]) })
         } else {
