@@ -1,6 +1,7 @@
 extern crate bytes;
 extern crate clap;
 extern crate diesel;
+extern crate diesel_migrations;
 extern crate dotenv;
 extern crate error_chain;
 extern crate futures;
@@ -15,7 +16,9 @@ use std::path::PathBuf;
 
 use bytes::buf::Buf;
 use clap::{App, Arg};
+use diesel::dsl::exists;
 use diesel::prelude::*;
+use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use error_chain::ChainedError;
 use futures::future::{done, failed, ok};
@@ -107,6 +110,10 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
             .long("arch")
             .number_of_values(1)
             .multiple(true))
+        .arg(Arg::with_name("REQUIRES")
+            .long("requires")
+            .number_of_values(1)
+            .multiple(true))
         .arg(Arg::with_name("URI")
             .required(true)
             .index(1))
@@ -117,9 +124,12 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         .or_else(|| { env::var("DATABASE_URL").ok() })
         .unwrap_or_else(|| "index.sqlite".to_owned());
     let arches = matches.values_of_lossy("ARCH");
+    let requirements = matches.values_of_lossy("REQUIRES");
     let repo_uri = matches.value_of("URI").unwrap();
     let conn = try_future!(SqliteConnection::establish(&database_url)
         .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)));
+    try_future!(run_pending_migrations(&conn)
+        .chain_err(|| "run_pending_migrations() failed"));
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
     let repomd_uri = try_future!(repomd_uri_str.parse()
         .chain_err(|| format!("Malformed URI: {}", repomd_uri_str)));
@@ -144,9 +154,14 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
             let conn = try_future!(SqliteConnection::establish(&database_url)
                 .chain_err(|| format!(
                     "SqliteConnection::establish({}) failed", database_url)));
-            let mut query = index_repo::schema::packages::table.into_boxed();
+            let mut query = packages::table.into_boxed();
+            if let Some(requirements) = requirements {
+                query = query.filter(exists(requires::table.filter(
+                    requires::pkgKey.eq(packages::pkgKey)
+                        .and(requires::name.eq_any(requirements)))));
+            }
             if let Some(arches) = arches {
-                query = query.filter(index_repo::schema::packages::arch.eq_any(arches));
+                query = query.filter(packages::arch.eq_any(arches));
             }
             let packages = try_future!(query.load::<Package>(&conn)
                 .chain_err(|| "Failed to query packages"));

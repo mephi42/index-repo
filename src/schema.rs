@@ -16,3 +16,13 @@ table! {
         checksum_type -> Text,
     }
 }
+
+table! {
+    // FIXME: There is no primary key, so using an arbitrary column to make Diesel happy
+    requires (name) {
+        name -> Text,
+        pkgKey -> Integer,
+    }
+}
+
+allow_tables_to_appear_in_same_query!(requires, packages);
