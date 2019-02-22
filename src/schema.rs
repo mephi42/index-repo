@@ -12,6 +12,7 @@ table! {
         pkgId -> Text,
         name -> Text,
         arch -> Text,
+        size_package -> Integer,
         location_href -> Text,
         checksum_type -> Text,
     }

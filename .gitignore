@@ -1,5 +1,6 @@
 /.idea/
 /Cargo.lock
 /target/
+Packages/
 index.sqlite
 repodata/

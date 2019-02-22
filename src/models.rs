@@ -13,6 +13,7 @@ pub struct Package {
     pub pkg_id: String,
     pub name: String,
     pub arch: String,
+    pub size_package: i32,
     pub location_href: String,
     pub checksum_type: String,
 }

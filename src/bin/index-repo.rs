@@ -14,7 +14,7 @@ extern crate tempfile;
 extern crate xz2;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bytes::buf::Buf;
 use clap::{App, Arg};
@@ -27,6 +27,7 @@ use dotenv::dotenv;
 use error_chain::ChainedError;
 use futures::future::{done, failed, ok};
 use futures::Stream;
+use futures::stream::iter_ok;
 use hyper::rt;
 use hyper::rt::Future;
 use itertools::Itertools;
@@ -83,19 +84,16 @@ fn persist_repomd(conn: &SqliteConnection, repo_uri: &str, primary_db_data: &rep
     })
 }
 
-fn fetch_repomd_data(client: &http::Client, repo_uri: &str, data: &repomd::Data)
-                     -> Box<Future<Item=PathBuf, Error=Error> + Send> {
-    let decoder = Decoder::from_href(&data.location.href);
+fn fetch_file(client: &http::Client, repo_uri: &str, href: &str, open_checksum: &repomd::Checksum)
+              -> Box<Future<Item=PathBuf, Error=Error> + Send> {
+    let decoder = Decoder::from_href(href);
     let path = decoder.path().to_owned();
-    let open_checksum = try_future!(data.open_checksum
-        .as_ref()
-        .ok_or_else(|| "Missing <open-checksum>".into()));
     if let Ok(hexdigest) = hashes::hexdigest_path(&path, &open_checksum.tpe) {
         if hexdigest == open_checksum.hexdigest {
             return Box::new(ok(path));
         }
     };
-    let uri_str = repo_uri.to_owned() + "/" + &data.location.href;
+    let uri_str = repo_uri.to_owned() + "/" + href;
     let uri = try_future!(uri_str.parse().chain_err(|| format!("Malformed URI: {}", uri_str)));
     let file = try_future!(create_file_all(&path));
     Box::new(http::checked_fetch(client, &uri)
@@ -118,6 +116,47 @@ fn like_from_wildcard(s: &str) -> String {
     }).collect()
 }
 
+fn get_package_hrefs(path: &Path, arches: &Option<Vec<String>>, requirements: &Option<Vec<String>>)
+                     -> Result<Vec<Package>> {
+    let database_url = "file:".to_owned() +
+        path.to_str().chain_err(|| format!("Malformed path: {:?}", path))? +
+        "?mode=ro";
+    let conn = SqliteConnection::establish(&database_url)
+        .chain_err(|| format!(
+            "SqliteConnection::establish({}) failed", database_url))?;
+    let mut query = packages::table.into_boxed();
+    if let Some(requirements) = requirements {
+        // https://stackoverflow.com/a/48712715/3832536
+        // https://github.com/diesel-rs/diesel/issues/1544#issuecomment-363440046
+        type B = Box<BoxableExpression<
+            Join<requires::table, packages::table, Inner>,
+            diesel::sqlite::Sqlite,
+            SqlType=sql_types::Bool>>;
+        let like: B = requirements
+            .iter()
+            .map(|r| -> B {
+                Box::new(requires::name.like(like_from_wildcard(r)))
+            }).fold1(|q, l| Box::new(q.or(l)))
+            .unwrap();
+        query = query.filter(exists(requires::table.filter(
+            requires::pkgKey.eq(packages::pkgKey).and(like))));
+    }
+    if let Some(arches) = arches {
+        query = query.filter(packages::arch.eq_any(arches));
+    }
+    query.load::<Package>(&conn).chain_err(|| "Failed to query packages")
+}
+
+fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
+                 -> Box<Future<Item=(), Error=Error> + Send> {
+    Box::new(fetch_file(client, repo_uri, &p.location_href, &repomd::Checksum {
+        tpe: p.checksum_type.to_owned(),
+        hexdigest: p.pkg_id.to_owned(),
+    }).and_then(|_path| {
+        ok(())
+    }))
+}
+
 fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
     dotenv().ok();
     let matches = App::new(env!("CARGO_PKG_NAME"))
@@ -135,6 +174,10 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
             .long("requires")
             .number_of_values(1)
             .multiple(true))
+        .arg(Arg::with_name("JOBS")
+            .short("j")
+            .long("jobs")
+            .default_value("1"))
         .arg(Arg::with_name("URI")
             .required(true)
             .index(1))
@@ -146,6 +189,8 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         .unwrap_or_else(|| "index.sqlite".to_owned());
     let arches = matches.values_of_lossy("ARCH");
     let requirements = matches.values_of_lossy("REQUIRES");
+    let jobs = try_future!(matches.value_of("JOBS").unwrap().parse::<usize>()
+        .chain_err(|| format!("Malformed -j/--jobs value")));
     let repo_uri = matches.value_of("URI").unwrap();
     let conn = try_future!(SqliteConnection::establish(&database_url)
         .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)));
@@ -158,47 +203,30 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
     Box::new(fetch_repomd(&client, &repomd_uri)
         .and_then({
             let repo_uri = repo_uri.to_owned();
-            move |doc| -> Box<Future<Item=PathBuf, Error=Error> + Send> {
+            move |doc| -> Box<Future<Item=(http::Client, PathBuf), Error=Error> + Send> {
                 let primary_db_data = try_future!(doc.data
                     .iter()
                     .find(|data| data.tpe == "primary_db")
                     .ok_or_else(|| r#"Missing <data type="primary_db">"#.into()));
                 try_future!(persist_repomd(&conn, &repo_uri, &primary_db_data));
-                fetch_repomd_data(&client, &repo_uri, &primary_db_data)
+                let open_checksum = try_future!(primary_db_data.open_checksum
+                    .as_ref()
+                    .ok_or_else(|| "Missing <open-checksum>".into()));
+                let primary_db_href = &primary_db_data.location.href;
+                Box::new(fetch_file(&client, &repo_uri, primary_db_href, &open_checksum)
+                    .map(|path| (client, path)))
             }
         })
-        .and_then(|path| {
-            let database_url = "file:".to_owned() +
-                try_future!(path.to_str()
-                    .ok_or_else(|| format!("Malformed path: {:?}", path).into())) +
-                "?mode=ro";
-            let conn = try_future!(SqliteConnection::establish(&database_url)
-                .chain_err(|| format!(
-                    "SqliteConnection::establish({}) failed", database_url)));
-            let mut query = packages::table.into_boxed();
-            if let Some(requirements) = requirements {
-                // https://stackoverflow.com/a/48712715/3832536
-                // https://github.com/diesel-rs/diesel/issues/1544#issuecomment-363440046
-                type B = Box<BoxableExpression<
-                    Join<requires::table, packages::table, Inner>,
-                    diesel::sqlite::Sqlite,
-                    SqlType=sql_types::Bool>>;
-                let like: B = requirements
-                    .iter()
-                    .map(|r| -> B {
-                        Box::new(requires::name.like(like_from_wildcard(r)))
-                    }).fold1(|q, l| Box::new(q.or(l)))
-                    .unwrap();
-                query = query.filter(exists(requires::table.filter(
-                    requires::pkgKey.eq(packages::pkgKey).and(like))));
+        .and_then({
+            let repo_uri = repo_uri.to_owned();
+            move |(client, path)| -> Box<Future<Item=(), Error=Error> + Send> {
+                let package_hrefs = try_future!(get_package_hrefs(&path, &arches, &requirements));
+                Box::new(iter_ok(package_hrefs)
+                    .map(move |p| index_package(&client, &repo_uri, &p))
+                    .buffer_unordered(jobs)
+                    .collect()
+                    .map(|_| ()))
             }
-            if let Some(arches) = arches {
-                query = query.filter(packages::arch.eq_any(arches));
-            }
-            let packages = try_future!(query.load::<Package>(&conn)
-                .chain_err(|| "Failed to query packages"));
-            eprintln!("{} package(s)", packages.len());
-            Box::new(ok(()))
         }))
 }
 
