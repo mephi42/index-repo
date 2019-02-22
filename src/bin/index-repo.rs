@@ -8,6 +8,8 @@ extern crate futures;
 extern crate hyper;
 #[macro_use]
 extern crate index_repo;
+extern crate itertools;
+extern crate smallvec;
 extern crate tempfile;
 extern crate xz2;
 
@@ -18,6 +20,8 @@ use bytes::buf::Buf;
 use clap::{App, Arg};
 use diesel::dsl::exists;
 use diesel::prelude::*;
+use diesel::query_source::joins::{Inner, Join};
+use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use error_chain::ChainedError;
@@ -25,6 +29,8 @@ use futures::future::{done, failed, ok};
 use futures::Stream;
 use hyper::rt;
 use hyper::rt::Future;
+use itertools::Itertools;
+use smallvec::SmallVec;
 
 use index_repo::decoders::Decoder;
 use index_repo::errors::*;
@@ -97,6 +103,21 @@ fn fetch_repomd_data(client: &http::Client, repo_uri: &str, data: &repomd::Data)
         .and_then(|()| ok(path)))
 }
 
+fn like_from_wildcard(s: &str) -> String {
+    s.chars().flat_map(|c| {
+        let mut v = SmallVec::<[char; 2]>::new();
+        match c {
+            '*' => v.push('%'),
+            '?' => v.push('_'),
+            '%' => v.extend_from_slice(&['\\', '%']),
+            '_' => v.extend_from_slice(&['\\', '_']),
+            '\\' => v.extend_from_slice(&['\\', '\\']),
+            x => v.push(x),
+        };
+        v
+    }).collect()
+}
+
 fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
     dotenv().ok();
     let matches = App::new(env!("CARGO_PKG_NAME"))
@@ -156,9 +177,20 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
                     "SqliteConnection::establish({}) failed", database_url)));
             let mut query = packages::table.into_boxed();
             if let Some(requirements) = requirements {
+                // https://stackoverflow.com/a/48712715/3832536
+                // https://github.com/diesel-rs/diesel/issues/1544#issuecomment-363440046
+                type B = Box<BoxableExpression<
+                    Join<requires::table, packages::table, Inner>,
+                    diesel::sqlite::Sqlite,
+                    SqlType=sql_types::Bool>>;
+                let like: B = requirements
+                    .iter()
+                    .map(|r| -> B {
+                        Box::new(requires::name.like(like_from_wildcard(r)))
+                    }).fold1(|q, l| Box::new(q.or(l)))
+                    .unwrap();
                 query = query.filter(exists(requires::table.filter(
-                    requires::pkgKey.eq(packages::pkgKey)
-                        .and(requires::name.eq_any(requirements)))));
+                    requires::pkgKey.eq(packages::pkgKey).and(like))));
             }
             if let Some(arches) = arches {
                 query = query.filter(packages::arch.eq_any(arches));
