@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::from_utf8;
 
 use futures::{Future, Stream};
 use futures::future::ok;
@@ -156,6 +157,28 @@ pub struct FullHeader {
     pub header: Header,
     pub index_entries: HashMap<u32, IndexEntry>,
     pub store: Vec<u8>,
+}
+
+impl FullHeader {
+    pub fn get_string_tag(&self, tag: u32, default: &str) -> Result<String> {
+        let entry = match self.index_entries.get(&tag) {
+            Some(t) => t,
+            None => return Ok(default.to_owned()),
+        };
+        if entry.tpe != 6 {
+            return Err("RPM index entry has incorrect type".into());
+        }
+        if entry.offset as usize >= self.store.len() {
+            return Err("RPM index entry points past the end of the store".into());
+        }
+        from_utf8(&self.store[entry.offset as usize..self.store.len()]
+            .iter()
+            .cloned()
+            .take_while(|b| *b != 0)
+            .collect::<Vec<_>>())
+            .chain_err(|| "RPM index entry points to malformed UTF-8")
+            .map(|s| s.to_owned())
+    }
 }
 
 type ReadFullHeader<A> = Box<Future<Item=(A, usize, FullHeader), Error=Error> + Send>;

@@ -164,8 +164,10 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         rpm::read_full_header(file, pos)
     }).and_then(|(file, pos, _rpm_signature_header)| {
         rpm::read_full_header(file, pos)
-    }).and_then(|(_file, _pos, _rpm_header)| {
-        ok(())
+    }).and_then(|(_file, _pos, rpm_header)| {
+        let _format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
+        let _coding = try_future!(rpm_header.get_string_tag(1125, "gzip"));
+        Box::new(ok(()))
     }))
 }
 
