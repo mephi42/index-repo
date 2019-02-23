@@ -14,6 +14,7 @@ extern crate tempfile;
 extern crate tokio;
 extern crate xz2;
 
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -41,7 +42,7 @@ use index_repo::hashes;
 use index_repo::http;
 use index_repo::models::*;
 use index_repo::repomd;
-use index_repo::rpm::{read_rpm_header, read_rpm_lead};
+use index_repo::rpm;
 use index_repo::schema::*;
 
 fn fetch_repomd(client: &http::Client, repomd_uri: &hyper::Uri)
@@ -158,10 +159,19 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         tokio::fs::File::open(path.clone())
             .chain_err(move || format!("Could not open {:?}", path))
     }).and_then(|file| {
-        read_rpm_lead(file)
+        rpm::read_lead(file)
     }).and_then(|(file, _rpm_lead)| {
-        read_rpm_header(file)
-    }).and_then(|(_file, _rpm_header)| {
+        rpm::read_header(file)
+    }).and_then(|(file, rpm_header)| {
+        let index_entries = HashMap::with_capacity(rpm_header.index_entry_count as usize);
+        futures::stream::iter_ok(0..rpm_header.index_entry_count)
+            .fold((file, index_entries), |(file, mut index_entries), _| {
+                rpm::read_index_entry(file).map(|(file, index_entry)| {
+                    index_entries.insert(index_entry.tag, index_entry);
+                    (file, index_entries)
+                })
+            })
+    }).and_then(|(_file, _index_entries)| {
         ok(())
     }))
 }
