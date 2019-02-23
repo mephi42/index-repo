@@ -12,6 +12,7 @@ extern crate itertools;
 extern crate smallvec;
 extern crate tempfile;
 extern crate tokio;
+extern crate tokio_io;
 extern crate xz2;
 
 use std::collections::HashMap;
@@ -171,7 +172,12 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
                     (file, index_entries)
                 })
             })
-    }).and_then(|(_file, _index_entries)| {
+            .map(|(file, index_entries)| {
+                (file, rpm_header, index_entries)
+            })
+    }).and_then(|(file, rpm_header, index_entries)| {
+        rpm::read_store(file, rpm_header.store_size as usize, index_entries)
+    }).and_then(|(_file, _store)| {
         ok(())
     }))
 }
