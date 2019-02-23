@@ -15,7 +15,6 @@ extern crate tokio;
 extern crate tokio_io;
 extern crate xz2;
 
-use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -160,24 +159,12 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         tokio::fs::File::open(path.clone())
             .chain_err(move || format!("Could not open {:?}", path))
     }).and_then(|file| {
-        rpm::read_lead(file)
-    }).and_then(|(file, _rpm_lead)| {
-        rpm::read_header(file)
-    }).and_then(|(file, rpm_header)| {
-        let index_entries = HashMap::with_capacity(rpm_header.index_entry_count as usize);
-        futures::stream::iter_ok(0..rpm_header.index_entry_count)
-            .fold((file, index_entries), |(file, mut index_entries), _| {
-                rpm::read_index_entry(file).map(|(file, index_entry)| {
-                    index_entries.insert(index_entry.tag, index_entry);
-                    (file, index_entries)
-                })
-            })
-            .map(|(file, index_entries)| {
-                (file, rpm_header, index_entries)
-            })
-    }).and_then(|(file, rpm_header, index_entries)| {
-        rpm::read_store(file, rpm_header.store_size as usize, index_entries)
-    }).and_then(|(_file, _store)| {
+        rpm::read_lead(file, 0)
+    }).and_then(|(file, pos, _rpm_lead)| {
+        rpm::read_full_header(file, pos)
+    }).and_then(|(file, pos, _rpm_signature_header)| {
+        rpm::read_full_header(file, pos)
+    }).and_then(|(_file, _pos, _rpm_header)| {
         ok(())
     }))
 }
@@ -215,7 +202,7 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
     let arches = matches.values_of_lossy("ARCH");
     let requirements = matches.values_of_lossy("REQUIRES");
     let jobs = try_future!(matches.value_of("JOBS").unwrap().parse::<usize>()
-        .chain_err(|| format!("Malformed -j/--jobs value")));
+        .chain_err(|| "Malformed -j/--jobs value"));
     let repo_uri = matches.value_of("URI").unwrap();
     let conn = try_future!(SqliteConnection::establish(&database_url)
         .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)));

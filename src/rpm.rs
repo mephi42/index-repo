@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use futures::Future;
-use futures::future::{failed, ok};
+use futures::{Future, Stream};
+use futures::future::ok;
 use nom::{be_u16, be_u32, be_u8};
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
@@ -22,6 +22,8 @@ pub struct Lead {
 
 static LEAD_MAGIC: [u8; 4] = [0xed, 0xab, 0xee, 0xdb];
 
+static LEAD_SIZE: usize = 96;
+
 named!(parse_lead<Lead>,
     do_parse!(
         tag!(LEAD_MAGIC.as_ref()) >>
@@ -34,7 +36,7 @@ named!(parse_lead<Lead>,
         signature_type: be_u16 >>
         reserved: take!(16) >>
         (Lead {
-            magic: LEAD_MAGIC.clone(),
+            magic: LEAD_MAGIC,
             major,
             minor,
             tpe,
@@ -54,19 +56,21 @@ named!(parse_lead<Lead>,
         }))
 );
 
-type ReadLead<A> = Box<Future<Item=(A, Lead), Error=Error> + Send>;
+type ReadLead<A> = Box<Future<Item=(A, usize, Lead), Error=Error> + Send>;
 
-pub fn read_lead<A: AsyncRead + Send + 'static>(a: A) -> ReadLead<A> {
-    Box::new(read_exact(a, vec![0u8; 96])
+pub fn read_lead<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadLead<A> {
+    Box::new(read_exact(a, vec![0u8; LEAD_SIZE])
         .chain_err(|| "Could not read RPM lead")
-        .and_then(|(a, buf): (A, Vec<u8>)| -> ReadLead<A> {
+        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadLead<A> {
             let (_, rpm_lead) = try_future!(parse_lead(&buf)
                 .map_err(|_| "Could not parse RPM lead - bad magic?".into()));
-            Box::new(ok((a, rpm_lead)))
+            Box::new(ok((a, pos + LEAD_SIZE, rpm_lead)))
         }))
 }
 
 static HEADER_MAGIC: [u8; 3] = [0x8e, 0xad, 0xe8];
+
+static HEADER_SIZE: usize = 16;
 
 pub struct Header {
     pub magic: [u8; 3],
@@ -84,7 +88,7 @@ named!(parse_header<Header>,
         index_entry_count: be_u32 >>
         store_size: be_u32 >>
         (Header {
-            magic: HEADER_MAGIC.clone(),
+            magic: HEADER_MAGIC,
             version,
             reserved: {
                 let mut tmp = [0u8; 4];
@@ -96,15 +100,20 @@ named!(parse_header<Header>,
         }))
 );
 
-type ReadHeader<A> = Box<Future<Item=(A, Header), Error=Error> + Send>;
+type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send>;
 
-pub fn read_header<A: AsyncRead + Send + 'static>(a: A) -> ReadHeader<A> {
-    Box::new(read_exact(a, vec![0u8; 16])
-        .chain_err(|| "Could not read RPM header")
-        .and_then(|(a, buf): (A, Vec<u8>)| -> ReadHeader<A> {
+pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeader<A> {
+    let padding = ((pos + 7) & !7) - pos;
+    Box::new(read_exact(a, vec![0u8; padding])
+        .chain_err(|| "Could not pad RPM header")
+        .and_then(move |(a, _)| {
+            read_exact(a, vec![0u8; HEADER_SIZE])
+                .chain_err(|| "Could not read RPM header")
+        })
+        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadHeader<A> {
             let (_, rpm_header) = try_future!(parse_header(&buf)
                 .map_err(|_| "Could not parse RPM header - bad magic?".into()));
-            Box::new(ok((a, rpm_header)))
+            Box::new(ok((a, pos + padding + HEADER_SIZE, rpm_header)))
         }))
 }
 
@@ -114,6 +123,8 @@ pub struct IndexEntry {
     pub offset: u32,
     pub count: u32,
 }
+
+static INDEX_ENTRY_SIZE: usize = 16;
 
 named!(parse_index_entry<IndexEntry>,
     do_parse!(
@@ -129,38 +140,44 @@ named!(parse_index_entry<IndexEntry>,
         }))
 );
 
-type ReadIndexEntry<A> = Box<Future<Item=(A, IndexEntry), Error=Error> + Send>;
+type ReadIndexEntry<A> = Box<Future<Item=(A, usize, IndexEntry), Error=Error> + Send>;
 
-pub fn read_index_entry<A: AsyncRead + Send + 'static>(a: A) -> ReadIndexEntry<A> {
-    Box::new(read_exact(a, vec![0u8; 16])
+pub fn read_index_entry<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadIndexEntry<A> {
+    Box::new(read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
         .chain_err(|| "Could not read RPM index entry")
-        .and_then(|(a, buf): (A, Vec<u8>)| -> ReadIndexEntry<A> {
+        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadIndexEntry<A> {
             let (_, rpm_header) = try_future!(parse_index_entry(&buf)
                 .map_err(|_| "Could not parse RPM index entry".into()));
-            Box::new(ok((a, rpm_header)))
+            Box::new(ok((a, pos + INDEX_ENTRY_SIZE, rpm_header)))
         }))
 }
 
-pub struct Store {
-    pub payload_format: String,
-    pub payload_coding: String,
+pub struct FullHeader {
+    pub header: Header,
+    pub index_entries: HashMap<u32, IndexEntry>,
+    pub store: Vec<u8>,
 }
 
-type ReadStore<A> = Box<Future<Item=(A, Store), Error=Error> + Send>;
+type ReadFullHeader<A> = Box<Future<Item=(A, usize, FullHeader), Error=Error> + Send>;
 
-pub fn read_store<A: AsyncRead + Send + 'static>(a: A, size: usize, index_entries: HashMap<u32, IndexEntry>) -> ReadStore<A> {
-    Box::new(read_exact(a, vec![0u8; size])
-        .chain_err(|| "Could not read RPM store")
-        .and_then(move |(a, _buf): (A, Vec<u8>)| -> ReadStore<A> {
-            if index_entries.contains_key(&1124) {
-                return Box::new(failed("Custom payload formats are not supported".into()));
-            }
-            if index_entries.contains_key(&1125) {
-                return Box::new(failed("Custom payload codings are not supported".into()));
-            }
-            Box::new(ok((a, Store {
-                payload_format: "cpio".to_owned(),
-                payload_coding: "gzip".to_owned(),
-            })))
-        }))
+pub fn read_full_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadFullHeader<A> {
+    Box::new(read_header(a, pos).and_then(|(a, pos, header)| {
+        let index_entries = HashMap::with_capacity(header.index_entry_count as usize);
+        futures::stream::iter_ok(0..header.index_entry_count)
+            .fold(((a, pos), index_entries), |((a, pos), mut index_entries), _| {
+                read_index_entry(a, pos).map(|(a, pos, index_entry)| {
+                    index_entries.insert(index_entry.tag, index_entry);
+                    ((a, pos), index_entries)
+                })
+            })
+            .map(|((a, pos), index_entries)| {
+                (a, pos, header, index_entries)
+            })
+    }).and_then(|(a, pos, header, index_entries)| {
+        read_exact(a, vec![0u8; header.store_size as usize])
+            .chain_err(|| "Could not read RPM store")
+            .map(move |(a, store)| {
+                (a, pos + header.store_size as usize, FullHeader { header, index_entries, store })
+            })
+    }))
 }
