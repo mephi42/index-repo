@@ -14,7 +14,7 @@ macro_rules! try_future {
     ( $x:expr ) => {
         match $x {
             Ok(t) => t,
-            Err(e) => return Box::new(failed(e)),
+            Err(e) => return Box::new(futures::future::failed(e)),
         }
     }
 }

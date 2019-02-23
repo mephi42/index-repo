@@ -11,6 +11,7 @@ extern crate index_repo;
 extern crate itertools;
 extern crate smallvec;
 extern crate tempfile;
+extern crate tokio;
 extern crate xz2;
 
 use std::env;
@@ -25,7 +26,7 @@ use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use error_chain::ChainedError;
-use futures::future::{done, failed, ok};
+use futures::future::{done, ok};
 use futures::Stream;
 use futures::stream::iter_ok;
 use hyper::rt;
@@ -40,6 +41,7 @@ use index_repo::hashes;
 use index_repo::http;
 use index_repo::models::*;
 use index_repo::repomd;
+use index_repo::rpm::read_rpm_lead;
 use index_repo::schema::*;
 
 fn fetch_repomd(client: &http::Client, repomd_uri: &hyper::Uri)
@@ -152,7 +154,12 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
     Box::new(fetch_file(client, repo_uri, &p.location_href, &repomd::Checksum {
         tpe: p.checksum_type.to_owned(),
         hexdigest: p.pkg_id.to_owned(),
-    }).and_then(|_path| {
+    }).and_then(|path| {
+        tokio::fs::File::open(path.clone())
+            .chain_err(move || format!("Could not open {:?}", path))
+    }).and_then(|file| {
+        read_rpm_lead(file)
+    }).and_then(|(_file, _rpm_lead)| {
         ok(())
     }))
 }

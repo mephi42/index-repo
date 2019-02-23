@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use futures::future::{failed, ok};
+use futures::future::ok;
 use futures::Stream;
 use hyper::{Body, Response};
 use hyper::rt::Future;
