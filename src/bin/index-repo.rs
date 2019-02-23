@@ -41,7 +41,7 @@ use index_repo::hashes;
 use index_repo::http;
 use index_repo::models::*;
 use index_repo::repomd;
-use index_repo::rpm::read_rpm_lead;
+use index_repo::rpm::{read_rpm_header, read_rpm_lead};
 use index_repo::schema::*;
 
 fn fetch_repomd(client: &http::Client, repomd_uri: &hyper::Uri)
@@ -159,7 +159,9 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
             .chain_err(move || format!("Could not open {:?}", path))
     }).and_then(|file| {
         read_rpm_lead(file)
-    }).and_then(|(_file, _rpm_lead)| {
+    }).and_then(|(file, _rpm_lead)| {
+        read_rpm_header(file)
+    }).and_then(|(_file, _rpm_header)| {
         ok(())
     }))
 }
