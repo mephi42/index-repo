@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["mephi42 <mephi42@gmail.com>"]
 
 [dependencies]
+arrayref = "0.3.5"
 bytes = "0.4.11"
 clap = "2.32.0"
 diesel = { version = "1.4.1", default-features = false, features = ["sqlite"] }

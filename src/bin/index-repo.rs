@@ -27,14 +27,17 @@ use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use error_chain::ChainedError;
-use futures::future::{done, ok};
+use futures::future::{done, failed, ok};
 use futures::Stream;
 use futures::stream::iter_ok;
 use hyper::rt;
 use hyper::rt::Future;
 use itertools::Itertools;
 use smallvec::SmallVec;
+use tokio_io::AsyncRead;
+use xz2::read::XzDecoder;
 
+use index_repo::cpio;
 use index_repo::decoders::Decoder;
 use index_repo::errors::*;
 use index_repo::fs::create_file_all;
@@ -164,10 +167,19 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         rpm::read_full_header(file, pos)
     }).and_then(|(file, pos, _rpm_signature_header)| {
         rpm::read_full_header(file, pos)
-    }).and_then(|(_file, _pos, rpm_header)| {
-        let _format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
-        let _coding = try_future!(rpm_header.get_string_tag(1125, "gzip"));
-        Box::new(ok(()))
+    }).and_then(|(file, pos, rpm_header)| -> cpio::ReadHeader<_> {
+        let format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
+        if format != "cpio" {
+            return Box::new(failed("Unsupported RPM payload format".into()));
+        }
+        let coding = try_future!(rpm_header.get_string_tag(1125, "gzip"));
+        let r: Box<AsyncRead + Send> = match coding.as_ref() {
+            "xz" => Box::new(XzDecoder::new(file)),
+            _ => return Box::new(failed("Unsupported RPM payload coding".into())),
+        };
+        cpio::read_header(r, pos)
+    }).and_then(|(_r, _pos, _cpio_header)| {
+        ok(())
     }))
 }
 

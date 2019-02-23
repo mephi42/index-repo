@@ -42,30 +42,22 @@ named!(parse_lead<Lead>,
             minor,
             tpe,
             archnum,
-            name: {
-                let mut tmp = [0u8; 66];
-                tmp.copy_from_slice(&name[0..66]);
-                tmp
-            },
+            name: *array_ref![name, 0, 66],
             osnum,
             signature_type,
-            reserved: {
-                let mut tmp = [0u8; 16];
-                tmp.copy_from_slice(&reserved[0..16]);
-                tmp
-            },
+            reserved: *array_ref![reserved, 0, 16],
         }))
 );
 
-type ReadLead<A> = Box<Future<Item=(A, usize, Lead), Error=Error> + Send>;
+pub type ReadLead<A> = Box<Future<Item=(A, usize, Lead), Error=Error> + Send>;
 
 pub fn read_lead<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadLead<A> {
     Box::new(read_exact(a, vec![0u8; LEAD_SIZE])
         .chain_err(|| "Could not read RPM lead")
         .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadLead<A> {
-            let (_, rpm_lead) = try_future!(parse_lead(&buf)
+            let (_, lead) = try_future!(parse_lead(&buf)
                 .map_err(|_| "Could not parse RPM lead - bad magic?".into()));
-            Box::new(ok((a, pos + LEAD_SIZE, rpm_lead)))
+            Box::new(ok((a, pos + LEAD_SIZE, lead)))
         }))
 }
 
@@ -91,17 +83,13 @@ named!(parse_header<Header>,
         (Header {
             magic: HEADER_MAGIC,
             version,
-            reserved: {
-                let mut tmp = [0u8; 4];
-                tmp.copy_from_slice(&reserved[0..4]);
-                tmp
-            },
+            reserved: *array_ref![reserved, 0, 4],
             index_entry_count,
             store_size,
         }))
 );
 
-type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send>;
+pub type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send>;
 
 pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeader<A> {
     let padding = ((pos + 7) & !7) - pos;
@@ -112,9 +100,9 @@ pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeade
                 .chain_err(|| "Could not read RPM header")
         })
         .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadHeader<A> {
-            let (_, rpm_header) = try_future!(parse_header(&buf)
+            let (_, header) = try_future!(parse_header(&buf)
                 .map_err(|_| "Could not parse RPM header - bad magic?".into()));
-            Box::new(ok((a, pos + padding + HEADER_SIZE, rpm_header)))
+            Box::new(ok((a, pos + padding + HEADER_SIZE, header)))
         }))
 }
 
@@ -141,15 +129,15 @@ named!(parse_index_entry<IndexEntry>,
         }))
 );
 
-type ReadIndexEntry<A> = Box<Future<Item=(A, usize, IndexEntry), Error=Error> + Send>;
+pub type ReadIndexEntry<A> = Box<Future<Item=(A, usize, IndexEntry), Error=Error> + Send>;
 
 pub fn read_index_entry<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadIndexEntry<A> {
     Box::new(read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
         .chain_err(|| "Could not read RPM index entry")
         .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadIndexEntry<A> {
-            let (_, rpm_header) = try_future!(parse_index_entry(&buf)
+            let (_, index_entry) = try_future!(parse_index_entry(&buf)
                 .map_err(|_| "Could not parse RPM index entry".into()));
-            Box::new(ok((a, pos + INDEX_ENTRY_SIZE, rpm_header)))
+            Box::new(ok((a, pos + INDEX_ENTRY_SIZE, index_entry)))
         }))
 }
 
@@ -181,7 +169,7 @@ impl FullHeader {
     }
 }
 
-type ReadFullHeader<A> = Box<Future<Item=(A, usize, FullHeader), Error=Error> + Send>;
+pub type ReadFullHeader<A> = Box<Future<Item=(A, usize, FullHeader), Error=Error> + Send>;
 
 pub fn read_full_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadFullHeader<A> {
     Box::new(read_header(a, pos).and_then(|(a, pos, header)| {

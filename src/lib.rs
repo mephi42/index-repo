@@ -1,4 +1,6 @@
 #[macro_use]
+extern crate arrayref;
+#[macro_use]
 extern crate diesel;
 #[macro_use]
 extern crate error_chain;
@@ -13,10 +15,13 @@ extern crate serde;
 extern crate serde_derive;
 extern crate serde_xml_rs;
 extern crate sha2;
+extern crate tokio;
 extern crate tokio_io;
 
 #[macro_use]
 pub mod errors;
+
+pub mod cpio;
 pub mod decoders;
 pub mod fs;
 pub mod hashes;
