@@ -1,12 +1,13 @@
 use std::str::from_utf8;
 use std::u64;
 
+use failure::Error;
 use futures::Future;
-use futures::future::ok;
+use futures::future::result;
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 
-use errors::*;
+use crate::errors::FutureExt;
 
 fn parse_u64(i: &[u8], n: usize) -> nom::IResult<&[u8], u64> {
     do_parse!(i, b: take!(n) >> (b))
@@ -76,10 +77,10 @@ pub type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send
 
 pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeader<A> {
     Box::new(read_exact(a, vec![0u8; HEADER_SIZE])
-        .chain_err(|| "Could not read CPIO header")
-        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadHeader<A> {
-            let (_, header) = try_future!(parse_header(&buf)
-                .map_err(|_| "Could not parse CPIO header - bad magic?".into()));
-            Box::new(ok((a, pos + HEADER_SIZE, header)))
-        }))
+        .context("Could not read CPIO header")
+        .map_err(Error::from)
+        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_header(&buf)
+            .map(|(_, header)| header)
+            .map_err(|_| format_err!("Could not parse CPIO header - bad magic?")))
+            .map(move |header| (a, pos + HEADER_SIZE, header))))
 }

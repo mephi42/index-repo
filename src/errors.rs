@@ -1,43 +1,82 @@
-use std::error;
+use std::fmt::Display;
 
-use diesel;
-use futures::Future;
-
-error_chain! {
-    foreign_links {
-        Diesel(diesel::result::Error);
-    }
-}
+use failure::{Context, Fail};
+use futures::{Future, Stream};
 
 #[macro_export]
 macro_rules! try_future {
     ( $x:expr ) => {
         match $x {
             Ok(t) => t,
-            Err(e) => return Box::new(futures::future::failed(e)),
+            Err(e) => return Box::new(futures::future::failed(e.into())),
         }
     }
 }
 
-// https://github.com/rust-lang-nursery/error-chain/issues/90#issuecomment-280703711
+pub trait FutureExt<T, E> {
+    fn context<D>(self, context: D) -> Box<Future<Item=T, Error=Context<D>> + Send> where
+        D: Display + Send + Sync + 'static,
+    ;
 
-pub type SFuture<T> = Box<Future<Item=T, Error=Error> + Send>;
-
-pub trait FutureChainErr<T> {
-    fn chain_err<F, E>(self, callback: F) -> SFuture<T>
-        where F: FnOnce() -> E + Send + 'static,
-              E: Into<ErrorKind>;
+    fn with_context<F, D>(self, f: F) -> Box<Future<Item=T, Error=Context<D>> + Send> where
+        F: FnOnce(&E) -> D + Send + 'static,
+        D: Display + Send + Sync + 'static,
+    ;
 }
 
-impl<F> FutureChainErr<F::Item> for F
-    where F: Future + Send + 'static,
-          F::Item: Send,
-          F::Error: error::Error + Send + 'static,
+impl<FF> FutureExt<<FF as Future>::Item, <FF as Future>::Error> for FF where
+    FF: Future + Send + 'static,
+    <FF as Future>::Error: Fail,
 {
-    fn chain_err<C, E>(self, callback: C) -> SFuture<F::Item>
-        where C: FnOnce() -> E + Send + 'static,
-              E: Into<ErrorKind>,
+    fn context<D>(self, context: D)
+                  -> Box<Future<Item=<FF as Future>::Item, Error=Context<D>> + Send> where
+        D: Display + Send + Sync + 'static,
     {
-        Box::new(self.then(|r| r.chain_err(callback)))
+        Box::new(self.map_err(|failure| failure.context(context)))
+    }
+
+    fn with_context<F, D>(self, f: F)
+                          -> Box<Future<Item=<FF as Future>::Item, Error=Context<D>> + Send> where
+        F: FnOnce(&<FF as Future>::Error) -> D + Send + 'static,
+        D: Display + Send + Sync + 'static,
+    {
+        Box::new(self.map_err(|failure| {
+            let context = f(&failure);
+            failure.context(context)
+        }))
+    }
+}
+
+pub trait StreamExt<T, E> {
+    fn context<D>(self, context: D) -> Box<Stream<Item=T, Error=Context<D>> + Send> where
+        D: Display + Send + Sync + Clone + 'static,
+    ;
+
+    fn with_context<S, D>(self, s: S) -> Box<Stream<Item=T, Error=Context<D>> + Send> where
+        S: FnMut(&E) -> D + Send + 'static,
+        D: Display + Send + Sync + 'static,
+    ;
+}
+
+impl<S> StreamExt<<S as Stream>::Item, <S as Stream>::Error> for S where
+    S: Stream + Send + 'static,
+    <S as Stream>::Error: Fail,
+{
+    fn context<D>(self, context: D)
+                  -> Box<Stream<Item=<S as Stream>::Item, Error=Context<D>> + Send> where
+        D: Display + Send + Sync + Clone + 'static,
+    {
+        Box::new(self.map_err(move |failure| failure.context(context.clone())))
+    }
+
+    fn with_context<F, D>(self, mut f: F)
+                          -> Box<Stream<Item=<S as Stream>::Item, Error=Context<D>> + Send> where
+        F: FnMut(&<S as Stream>::Error) -> D + Send + 'static,
+        D: Display + Send + Sync + 'static,
+    {
+        Box::new(self.map_err(move |failure| {
+            let context = f(&failure);
+            failure.context(context)
+        }))
     }
 }

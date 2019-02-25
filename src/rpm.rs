@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::str::from_utf8;
 
+use failure::{Error, ResultExt};
 use futures::{Future, Stream};
-use futures::future::ok;
+use futures::future::result;
 use nom::{be_u16, be_u32, be_u8};
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 
-use errors::*;
+use crate::errors::FutureExt;
 
 pub struct Lead {
     pub magic: [u8; 4],
@@ -53,12 +54,12 @@ pub type ReadLead<A> = Box<Future<Item=(A, usize, Lead), Error=Error> + Send>;
 
 pub fn read_lead<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadLead<A> {
     Box::new(read_exact(a, vec![0u8; LEAD_SIZE])
-        .chain_err(|| "Could not read RPM lead")
-        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadLead<A> {
-            let (_, lead) = try_future!(parse_lead(&buf)
-                .map_err(|_| "Could not parse RPM lead - bad magic?".into()));
-            Box::new(ok((a, pos + LEAD_SIZE, lead)))
-        }))
+        .context("Could not read RPM lead")
+        .map_err(Error::from)
+        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_lead(&buf)
+            .map(|(_, lead)| lead)
+            .map_err(|_| format_err!("Could not parse RPM lead - bad magic?")))
+            .map(move |lead| (a, pos + LEAD_SIZE, lead))))
 }
 
 static HEADER_MAGIC: [u8; 3] = [0x8e, 0xad, 0xe8];
@@ -94,16 +95,15 @@ pub type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send
 pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeader<A> {
     let padding = ((pos + 7) & !7) - pos;
     Box::new(read_exact(a, vec![0u8; padding])
-        .chain_err(|| "Could not pad RPM header")
-        .and_then(move |(a, _)| {
-            read_exact(a, vec![0u8; HEADER_SIZE])
-                .chain_err(|| "Could not read RPM header")
-        })
-        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadHeader<A> {
-            let (_, header) = try_future!(parse_header(&buf)
-                .map_err(|_| "Could not parse RPM header - bad magic?".into()));
-            Box::new(ok((a, pos + padding + HEADER_SIZE, header)))
-        }))
+        .context("Could not pad RPM header")
+        .map_err(Error::from)
+        .and_then(move |(a, _)| read_exact(a, vec![0u8; HEADER_SIZE])
+            .context("Could not read RPM header")
+            .map_err(Error::from))
+        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_header(&buf)
+            .map(|(_, header)| header)
+            .map_err(|_| format_err!("Could not parse RPM header - bad magic?")))
+            .map(move |header| (a, pos + padding + HEADER_SIZE, header))))
 }
 
 pub struct IndexEntry {
@@ -133,12 +133,12 @@ pub type ReadIndexEntry<A> = Box<Future<Item=(A, usize, IndexEntry), Error=Error
 
 pub fn read_index_entry<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadIndexEntry<A> {
     Box::new(read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
-        .chain_err(|| "Could not read RPM index entry")
-        .and_then(move |(a, buf): (A, Vec<u8>)| -> ReadIndexEntry<A> {
-            let (_, index_entry) = try_future!(parse_index_entry(&buf)
-                .map_err(|_| "Could not parse RPM index entry".into()));
-            Box::new(ok((a, pos + INDEX_ENTRY_SIZE, index_entry)))
-        }))
+        .context("Could not read RPM index entry")
+        .map_err(Error::from)
+        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_index_entry(&buf)
+            .map(|(_, index_entry)| index_entry)
+            .map_err(|_| format_err!("Could not parse RPM index entry")))
+            .map(move |index_entry| (a, pos + INDEX_ENTRY_SIZE, index_entry))))
 }
 
 pub struct FullHeader {
@@ -148,23 +148,24 @@ pub struct FullHeader {
 }
 
 impl FullHeader {
-    pub fn get_string_tag(&self, tag: u32, default: &str) -> Result<String> {
+    pub fn get_string_tag(&self, tag: u32, default: &str) -> Result<String, Error> {
         let entry = match self.index_entries.get(&tag) {
             Some(t) => t,
             None => return Ok(default.to_owned()),
         };
         if entry.tpe != 6 {
-            return Err("RPM index entry has incorrect type".into());
+            bail!("RPM index entry has incorrect type");
         }
         if entry.offset as usize >= self.store.len() {
-            return Err("RPM index entry points past the end of the store".into());
+            bail!("RPM index entry points past the end of the store");
         }
         from_utf8(&self.store[entry.offset as usize..self.store.len()]
             .iter()
             .cloned()
             .take_while(|b| *b != 0)
             .collect::<Vec<_>>())
-            .chain_err(|| "RPM index entry points to malformed UTF-8")
+            .context("RPM index entry points to malformed UTF-8")
+            .map_err(Error::from)
             .map(|s| s.to_owned())
     }
 }
@@ -181,14 +182,11 @@ pub fn read_full_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> Read
                     ((a, pos), index_entries)
                 })
             })
-            .map(|((a, pos), index_entries)| {
-                (a, pos, header, index_entries)
-            })
-    }).and_then(|(a, pos, header, index_entries)| {
+            .map(|((a, pos), index_entries)| (a, pos, header, index_entries))
+    }).and_then(|(a, pos, header, index_entries)|
         read_exact(a, vec![0u8; header.store_size as usize])
-            .chain_err(|| "Could not read RPM store")
-            .map(move |(a, store)| {
-                (a, pos + header.store_size as usize, FullHeader { header, index_entries, store })
-            })
-    }))
+            .context("Could not read RPM store")
+            .map_err(Error::from)
+            .map(move |(a, store)| (
+                a, pos + header.store_size as usize, FullHeader { header, index_entries, store }))))
 }

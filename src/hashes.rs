@@ -2,9 +2,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use failure::{Error, ResultExt};
 use sha2::{Digest, Sha256};
-
-use errors::*;
 
 trait Hash {
     fn update(&mut self, buf: &[u8]);
@@ -21,15 +20,15 @@ impl<T> Hash for T where T: Digest {
     }
 }
 
-pub fn hexdigest_path(path: &Path, hash_type: &str) -> Result<String> {
-    let file = File::open(path).chain_err(|| format!("File::open({:?}) failed", path))?;
+pub fn hexdigest_path(path: &Path, hash_type: &str) -> Result<String, Error> {
+    let file = File::open(path).with_context(|_| format!("File::open({:?}) failed", path))?;
     hexdigest_file(file, hash_type)
 }
 
-fn hexdigest_file_1<H>(mut file: File, mut hash: H) -> Result<String> where H: Hash {
+fn hexdigest_file_1<H>(mut file: File, mut hash: H) -> Result<String, Error> where H: Hash {
     let mut buf = [0 as u8; 8192];
     loop {
-        let n = file.read(&mut buf).chain_err(|| "File::read() failed")?;
+        let n = file.read(&mut buf).context("File::read() failed")?;
         if n == 0 {
             break Ok(hash.hexdigest());
         }
@@ -37,9 +36,9 @@ fn hexdigest_file_1<H>(mut file: File, mut hash: H) -> Result<String> where H: H
     }
 }
 
-fn hexdigest_file(file: File, hash_type: &str) -> Result<String> {
+fn hexdigest_file(file: File, hash_type: &str) -> Result<String, Error> {
     match hash_type {
         "sha256" => hexdigest_file_1(file, Sha256::new()),
-        _ => Err(format!("Unsupported hash type: {}", hash_type).into()),
+        _ => bail!("Unsupported hash type: {}", hash_type),
     }
 }

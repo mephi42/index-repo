@@ -2,11 +2,12 @@ extern crate index_repo;
 
 #[cfg(test)]
 mod test {
-    use index_repo::errors::*;
+    use failure::Error;
+
     use index_repo::repomd;
 
     #[test]
-    fn parse_repomd() -> Result<()> {
+    fn parse_repomd() -> Result<(), Error> {
         let doc = repomd::Document::parse(r#"<?xml version="1.0" encoding="UTF-8"?>
 <repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">
   <revision>1540419615</revision>

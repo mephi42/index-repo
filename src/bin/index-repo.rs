@@ -3,7 +3,8 @@ extern crate clap;
 extern crate diesel;
 extern crate diesel_migrations;
 extern crate dotenv;
-extern crate error_chain;
+#[macro_use]
+extern crate failure;
 extern crate futures;
 extern crate hyper;
 #[macro_use]
@@ -26,8 +27,8 @@ use diesel::query_source::joins::{Inner, Join};
 use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
-use error_chain::ChainedError;
-use futures::future::{done, failed, ok};
+use failure::{Error, ResultExt};
+use futures::future::{failed, ok, result};
 use futures::Stream;
 use futures::stream::iter_ok;
 use hyper::rt;
@@ -39,7 +40,7 @@ use xz2::read::XzDecoder;
 
 use index_repo::cpio;
 use index_repo::decoders::Decoder;
-use index_repo::errors::*;
+use index_repo::errors::FutureExt;
 use index_repo::fs::create_file_all;
 use index_repo::hashes;
 use index_repo::http;
@@ -53,38 +54,40 @@ fn fetch_repomd(client: &http::Client, repomd_uri: &hyper::Uri)
     http::checked_fetch(client, repomd_uri)
         .and_then({
             let repomd_uri = repomd_uri.clone();
-            move |response| {
-                response.into_body().concat2().chain_err({
+            move |response| response
+                .into_body()
+                .concat2()
+                .with_context({
                     let repomd_uri = repomd_uri.clone();
-                    move || format!(
+                    move |_| format!(
                         "Failed to fetch {}: failed to read response body", repomd_uri)
                 })
-            }
+                .map_err(Error::from)
         })
-        .and_then(|body| done(repomd::Document::parse(body.reader())))
+        .and_then(|body| result(repomd::Document::parse(body.reader())))
 }
 
 fn persist_repomd(conn: &SqliteConnection, repo_uri: &str, primary_db_data: &repomd::Data)
-                  -> Result<()> {
+                  -> Result<(), Error> {
     conn.transaction(|| {
         let repo_vec = repos::table
             .filter(repos::uri.eq(repo_uri))
             .limit(1)
             .load::<Repo>(conn)
-            .chain_err(|| "Failed to query repo by uri")?;
+            .context("Failed to query repo by uri")?;
         match repo_vec.first() {
             Some(repo) =>
                 diesel::update(repos::table.filter(repos::id.eq(repo.id)))
                     .set(repos::primary_db.eq(&primary_db_data.location.href))
                     .execute(conn)
-                    .chain_err(|| "Failed to update repo")?,
+                    .context("Failed to update repo")?,
             None =>
                 diesel::insert_into(repos::table)
                     .values((
                         repos::uri.eq(repo_uri),
                         repos::primary_db.eq(&primary_db_data.location.href)))
                     .execute(conn)
-                    .chain_err(|| "Failed to insert repo")?,
+                    .context("Failed to insert repo")?,
         };
         Ok(())
     })
@@ -100,7 +103,7 @@ fn fetch_file(client: &http::Client, repo_uri: &str, href: &str, open_checksum: 
         }
     };
     let uri_str = repo_uri.to_owned() + "/" + href;
-    let uri = try_future!(uri_str.parse().chain_err(|| format!("Malformed URI: {}", uri_str)));
+    let uri = try_future!(uri_str.parse::<hyper::Uri>().with_context(|_| format!("Malformed URI: {}", uri_str)));
     let file = try_future!(create_file_all(&path));
     Box::new(http::checked_fetch(client, &uri)
         .and_then(move |response| { decoder.decode_response(file, response) })
@@ -123,12 +126,12 @@ fn like_from_wildcard(s: &str) -> String {
 }
 
 fn get_package_hrefs(path: &Path, arches: &Option<Vec<String>>, requirements: &Option<Vec<String>>)
-                     -> Result<Vec<Package>> {
+                     -> Result<Vec<Package>, Error> {
     let database_url = "file:".to_owned() +
-        path.to_str().chain_err(|| format!("Malformed path: {:?}", path))? +
+        path.to_str().ok_or_else(|| format_err!("Malformed path: {:?}", path))? +
         "?mode=ro";
     let conn = SqliteConnection::establish(&database_url)
-        .chain_err(|| format!(
+        .with_context(|_| format!(
             "SqliteConnection::establish({}) failed", database_url))?;
     let mut query = packages::table.into_boxed();
     if let Some(requirements) = requirements {
@@ -150,7 +153,9 @@ fn get_package_hrefs(path: &Path, arches: &Option<Vec<String>>, requirements: &O
     if let Some(arches) = arches {
         query = query.filter(packages::arch.eq_any(arches));
     }
-    query.load::<Package>(&conn).chain_err(|| "Failed to query packages")
+    query.load::<Package>(&conn)
+        .context("Failed to query packages")
+        .map_err(Error::from)
 }
 
 fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
@@ -160,7 +165,8 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         hexdigest: p.pkg_id.to_owned(),
     }).and_then(|path| {
         tokio::fs::File::open(path.clone())
-            .chain_err(move || format!("Could not open {:?}", path))
+            .with_context(move |_| format!("Could not open {:?}", path))
+            .map_err(Error::from)
     }).and_then(|file| {
         rpm::read_lead(file, 0)
     }).and_then(|(file, pos, _rpm_lead)| {
@@ -170,12 +176,12 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
     }).and_then(|(file, pos, rpm_header)| -> cpio::ReadHeader<_> {
         let format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
         if format != "cpio" {
-            return Box::new(failed("Unsupported RPM payload format".into()));
+            return Box::new(failed(format_err!("Unsupported RPM payload format")));
         }
         let coding = try_future!(rpm_header.get_string_tag(1125, "gzip"));
         let r: Box<AsyncRead + Send> = match coding.as_ref() {
             "xz" => Box::new(XzDecoder::new(file)),
-            _ => return Box::new(failed("Unsupported RPM payload coding".into())),
+            _ => return Box::new(failed(format_err!("Unsupported RPM payload coding"))),
         };
         cpio::read_header(r, pos)
     }).and_then(|(_r, _pos, _cpio_header)| {
@@ -216,15 +222,15 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
     let arches = matches.values_of_lossy("ARCH");
     let requirements = matches.values_of_lossy("REQUIRES");
     let jobs = try_future!(matches.value_of("JOBS").unwrap().parse::<usize>()
-        .chain_err(|| "Malformed -j/--jobs value"));
+        .context("Malformed -j/--jobs value"));
     let repo_uri = matches.value_of("URI").unwrap();
     let conn = try_future!(SqliteConnection::establish(&database_url)
-        .chain_err(|| format!("SqliteConnection::establish({}) failed", database_url)));
+        .context(format!("SqliteConnection::establish({}) failed", database_url)));
     try_future!(run_pending_migrations(&conn)
-        .chain_err(|| "run_pending_migrations() failed"));
+        .context("run_pending_migrations() failed"));
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
-    let repomd_uri = try_future!(repomd_uri_str.parse()
-        .chain_err(|| format!("Malformed URI: {}", repomd_uri_str)));
+    let repomd_uri = try_future!(repomd_uri_str.parse::<hyper::Uri>()
+        .context(format!("Malformed URI: {}", repomd_uri_str)));
     let client = try_future!(http::make_client());
     Box::new(fetch_repomd(&client, &repomd_uri)
         .and_then({
@@ -233,11 +239,11 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
                 let primary_db_data = try_future!(doc.data
                     .iter()
                     .find(|data| data.tpe == "primary_db")
-                    .ok_or_else(|| r#"Missing <data type="primary_db">"#.into()));
+                    .ok_or_else(|| format_err!(r#"Missing <data type="primary_db">"#)));
                 try_future!(persist_repomd(&conn, &repo_uri, &primary_db_data));
                 let open_checksum = try_future!(primary_db_data.open_checksum
                     .as_ref()
-                    .ok_or_else(|| "Missing <open-checksum>".into()));
+                    .ok_or_else(|| format_err!("Missing <open-checksum>")));
                 let primary_db_href = &primary_db_data.location.href;
                 Box::new(fetch_file(&client, &repo_uri, primary_db_href, &open_checksum)
                     .map(|path| (client, path)))
@@ -258,7 +264,7 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
 
 fn main() {
     rt::run(Box::new(bootstrap().map_err(|e| {
-        eprintln!("{}", e.display_chain());
+        eprintln!("{}", e);
         std::process::exit(1);
     })));
 }

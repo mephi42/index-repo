@@ -2,6 +2,7 @@
 name = "index_repo"
 version = "0.1.0"
 authors = ["mephi42 <mephi42@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 arrayref = "0.3.5"
@@ -10,7 +11,7 @@ clap = "2.32.0"
 diesel = { version = "1.4.1", default-features = false, features = ["sqlite"] }
 diesel_migrations = "1.4.0"
 dotenv = "0.13.0"
-error-chain = "0.12.0"
+failure = "0.1.5"
 flate2 = { version = "1.0.6", features = ["tokio"] }
 futures = "0.1.25"
 hex = "0.3.2"

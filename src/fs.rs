@@ -1,15 +1,16 @@
 use std::fs::{create_dir_all, File};
 use std::path::Path;
 
-use errors::*;
+use failure::{Error, ResultExt};
 
-pub fn create_file_all(path: &Path) -> Result<File> {
+pub fn create_file_all(path: &Path) -> Result<File, Error> {
     let parent_path = match path.parent() {
         Some(t) => t,
-        None => return Err(format!("{:?} has no parent", path).into())
+        None => bail!("{:?} has no parent", path),
     };
     create_dir_all(parent_path)
-        .chain_err(|| format!("create_dir_all({:?}) failed", parent_path))?;
+        .with_context(|_| format!("create_dir_all({:?}) failed", parent_path))?;
     File::create(path)
-        .chain_err(|| format!("File::create({:?}) failed", path))
+        .with_context(|_| format!("File::create({:?}) failed", path))
+        .map_err(Error::from)
 }

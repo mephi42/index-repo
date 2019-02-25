@@ -1,8 +1,7 @@
 use std::io::Read;
 
+use failure::{Error, ResultExt, SyncFailure};
 use serde_xml_rs::from_reader;
-
-use errors::*;
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Checksum {
@@ -38,7 +37,10 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn parse<R: Read>(r: R) -> Result<Document> {
-        from_reader(r).chain_err(|| "Malformed repomd.xml")
+    pub fn parse<R: Read>(r: R) -> Result<Document, Error> {
+        from_reader(r)
+            .map_err(SyncFailure::new)
+            .context("Malformed repomd.xml")
+            .map_err(Error::from)
     }
 }
