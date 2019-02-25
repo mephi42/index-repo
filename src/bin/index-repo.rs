@@ -158,7 +158,7 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         rpm::read_full_header(file, pos)
     }).and_then(|(file, pos, _rpm_signature_header)| {
         rpm::read_full_header(file, pos)
-    }).and_then(|(file, pos, rpm_header)| -> cpio::ReadHeader<_> {
+    }).and_then(|(file, pos, rpm_header)| -> cpio::ReadName<_> {
         let format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
         if format != "cpio" {
             return Box::new(failed(format_err!("Unsupported RPM payload format")));
@@ -168,8 +168,10 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
             "xz" => Box::new(XzDecoder::new(file)),
             _ => return Box::new(failed(format_err!("Unsupported RPM payload coding"))),
         };
-        cpio::read_header(r, pos)
-    }).and_then(|(_r, _pos, _cpio_header)| {
+        Box::new(cpio::read_header(r, pos)
+            .and_then(|(r, pos, cpio_header)|
+                cpio::read_name(r, pos, cpio_header.c_namesize as usize)))
+    }).and_then(|(_r, _pos, _name)| {
         ok(())
     }))
 }

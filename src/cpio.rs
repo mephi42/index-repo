@@ -1,7 +1,7 @@
 use std::str::from_utf8;
 use std::u64;
 
-use failure::{Error, format_err};
+use failure::{Error, format_err, ResultExt};
 use futures::Future;
 use futures::future::result;
 use nom::{apply, do_parse, error_position, named, tag, take};
@@ -84,4 +84,19 @@ pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeade
             .map(|(_, header)| header)
             .map_err(|_| format_err!("Could not parse CPIO header - bad magic?")))
             .map(move |header| (a, pos + HEADER_SIZE, header))))
+}
+
+pub type ReadName<A> = Box<Future<Item=(A, usize, String), Error=Error> + Send>;
+
+pub fn read_name<A: AsyncRead + Send + 'static>(a: A, pos: usize, size: usize) -> ReadName<A> {
+    let end = pos + size;
+    let padding = ((end + 3) & !3) - end;
+    Box::new(read_exact(a, vec![0u8; size + padding])
+        .context("Could not read CPIO file name")
+        .map_err(Error::from)
+        .and_then(move |(a, name)| result(from_utf8(&name[..size - 1])
+            .map(|s| (a, s.to_owned()))
+            .context("Malformed CPIO file name")
+            .map_err(Error::from)))
+        .map(move |(a, s)| (a, pos + size + padding, s)))
 }
