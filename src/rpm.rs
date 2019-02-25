@@ -51,16 +51,16 @@ named!(parse_lead<Lead>,
         }))
 );
 
-pub type ReadLead<A> = Box<Future<Item=(A, usize, Lead), Error=Error> + Send>;
-
-pub fn read_lead<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadLead<A> {
-    Box::new(read_exact(a, vec![0u8; LEAD_SIZE])
+pub fn read_lead<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> impl Future<Item=(A, usize, Lead), Error=Error> {
+    read_exact(a, vec![0u8; LEAD_SIZE])
         .context("Could not read RPM lead")
         .map_err(Error::from)
         .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_lead(&buf)
             .map(|(_, lead)| lead)
             .map_err(|_| format_err!("Could not parse RPM lead - bad magic?")))
-            .map(move |lead| (a, pos + LEAD_SIZE, lead))))
+            .map(move |lead| (a, pos + LEAD_SIZE, lead)))
 }
 
 static HEADER_MAGIC: [u8; 3] = [0x8e, 0xad, 0xe8];
@@ -91,11 +91,11 @@ named!(parse_header<Header>,
         }))
 );
 
-pub type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send>;
-
-pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeader<A> {
+pub fn read_header<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> impl Future<Item=(A, usize, Header), Error=Error> {
     let padding = ((pos + 7) & !7) - pos;
-    Box::new(read_exact(a, vec![0u8; padding])
+    read_exact(a, vec![0u8; padding])
         .context("Could not pad RPM header")
         .map_err(Error::from)
         .and_then(move |(a, _)| read_exact(a, vec![0u8; HEADER_SIZE])
@@ -104,7 +104,7 @@ pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeade
         .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_header(&buf)
             .map(|(_, header)| header)
             .map_err(|_| format_err!("Could not parse RPM header - bad magic?")))
-            .map(move |header| (a, pos + padding + HEADER_SIZE, header))))
+            .map(move |header| (a, pos + padding + HEADER_SIZE, header)))
 }
 
 pub struct IndexEntry {
@@ -130,16 +130,16 @@ named!(parse_index_entry<IndexEntry>,
         }))
 );
 
-pub type ReadIndexEntry<A> = Box<Future<Item=(A, usize, IndexEntry), Error=Error> + Send>;
-
-pub fn read_index_entry<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadIndexEntry<A> {
-    Box::new(read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
+pub fn read_index_entry<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> impl Future<Item=(A, usize, IndexEntry), Error=Error> {
+    read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
         .context("Could not read RPM index entry")
         .map_err(Error::from)
         .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_index_entry(&buf)
             .map(|(_, index_entry)| index_entry)
             .map_err(|_| format_err!("Could not parse RPM index entry")))
-            .map(move |index_entry| (a, pos + INDEX_ENTRY_SIZE, index_entry))))
+            .map(move |index_entry| (a, pos + INDEX_ENTRY_SIZE, index_entry)))
 }
 
 pub struct FullHeader {
@@ -171,10 +171,10 @@ impl FullHeader {
     }
 }
 
-pub type ReadFullHeader<A> = Box<Future<Item=(A, usize, FullHeader), Error=Error> + Send>;
-
-pub fn read_full_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadFullHeader<A> {
-    Box::new(read_header(a, pos).and_then(|(a, pos, header)| {
+pub fn read_full_header<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> impl Future<Item=(A, usize, FullHeader), Error=Error> {
+    read_header(a, pos).and_then(|(a, pos, header)| {
         let index_entries = HashMap::with_capacity(header.index_entry_count as usize);
         futures::stream::iter_ok(0..header.index_entry_count)
             .fold(((a, pos), index_entries), |((a, pos), mut index_entries), _| {
@@ -189,5 +189,5 @@ pub fn read_full_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> Read
             .context("Could not read RPM store")
             .map_err(Error::from)
             .map(move |(a, store)| (
-                a, pos + header.store_size as usize, FullHeader { header, index_entries, store }))))
+                a, pos + header.store_size as usize, FullHeader { header, index_entries, store })))
 }

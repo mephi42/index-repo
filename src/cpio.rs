@@ -74,29 +74,29 @@ named!(parse_header<Header>,
         }))
 );
 
-pub type ReadHeader<A> = Box<Future<Item=(A, usize, Header), Error=Error> + Send>;
-
-pub fn read_header<A: AsyncRead + Send + 'static>(a: A, pos: usize) -> ReadHeader<A> {
-    Box::new(read_exact(a, vec![0u8; HEADER_SIZE])
+pub fn read_header<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> impl Future<Item=(A, usize, Header), Error=Error> {
+    read_exact(a, vec![0u8; HEADER_SIZE])
         .context("Could not read CPIO header")
         .map_err(Error::from)
         .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_header(&buf)
             .map(|(_, header)| header)
             .map_err(|_| format_err!("Could not parse CPIO header - bad magic?")))
-            .map(move |header| (a, pos + HEADER_SIZE, header))))
+            .map(move |header| (a, pos + HEADER_SIZE, header)))
 }
 
-pub type ReadName<A> = Box<Future<Item=(A, usize, String), Error=Error> + Send>;
-
-pub fn read_name<A: AsyncRead + Send + 'static>(a: A, pos: usize, size: usize) -> ReadName<A> {
+pub fn read_name<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize, size: usize,
+) -> impl Future<Item=(A, usize, String), Error=Error> {
     let end = pos + size;
     let padding = ((end + 3) & !3) - end;
-    Box::new(read_exact(a, vec![0u8; size + padding])
+    read_exact(a, vec![0u8; size + padding])
         .context("Could not read CPIO file name")
         .map_err(Error::from)
         .and_then(move |(a, name)| result(from_utf8(&name[..size - 1])
             .map(|s| (a, s.to_owned()))
             .context("Malformed CPIO file name")
             .map_err(Error::from)))
-        .map(move |(a, s)| (a, pos + size + padding, s)))
+        .map(move |(a, s)| (a, pos + size + padding, s))
 }

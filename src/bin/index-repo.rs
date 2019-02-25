@@ -143,9 +143,10 @@ fn get_package_hrefs(path: &Path, arches: &Option<Vec<String>>, requirements: &O
         .map_err(Error::from)
 }
 
-fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
-                 -> Box<Future<Item=(), Error=Error> + Send> {
-    Box::new(fetch_file(client, repo_uri, &p.location_href, &repomd::Checksum {
+fn index_package(
+    client: &http::Client, repo_uri: &str, p: &Package,
+) -> impl Future<Item=(), Error=Error> {
+    fetch_file(client, repo_uri, &p.location_href, &repomd::Checksum {
         tpe: p.checksum_type.to_owned(),
         hexdigest: p.pkg_id.to_owned(),
     }).and_then(|path| {
@@ -158,7 +159,8 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
         rpm::read_full_header(file, pos)
     }).and_then(|(file, pos, _rpm_signature_header)| {
         rpm::read_full_header(file, pos)
-    }).and_then(|(file, pos, rpm_header)| -> cpio::ReadName<_> {
+    }).and_then(|(file, pos, rpm_header)|
+                 -> Box<Future<Item=_, Error=_> + Send> {
         let format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
         if format != "cpio" {
             return Box::new(failed(format_err!("Unsupported RPM payload format")));
@@ -173,7 +175,7 @@ fn index_package(client: &http::Client, repo_uri: &str, p: &Package)
                 cpio::read_name(r, pos, cpio_header.c_namesize as usize)))
     }).and_then(|(_r, _pos, _name)| {
         ok(())
-    }))
+    })
 }
 
 fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
