@@ -1,3 +1,5 @@
+#![feature(async_await, await_macro, futures_api)]
+
 #[macro_use]
 extern crate index_repo;
 
@@ -12,14 +14,15 @@ use diesel::query_source::joins::{Inner, Join};
 use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
-use failure::{Error, format_err, ResultExt};
-use futures::future::{failed, ok, result};
+use failure::{bail, Error, format_err, ResultExt};
+use futures::future::{ok, result};
 use futures::Stream;
 use futures::stream::iter_ok;
 use hyper::rt::Future;
 use itertools::Itertools;
 use smallvec::SmallVec;
 use tokio::runtime::Runtime;
+use tokio_async_await::compat::forward::IntoAwaitable;
 use tokio_io::AsyncRead;
 use xz2::read::XzDecoder;
 
@@ -110,8 +113,8 @@ fn like_from_wildcard(s: &str) -> String {
     }).collect()
 }
 
-fn get_package_hrefs(path: &Path, arches: &Option<Vec<String>>, requirements: &Option<Vec<String>>)
-                     -> Result<Vec<Package>, Error> {
+fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option<Vec<String>>)
+                -> Result<Vec<Package>, Error> {
     let database_url = "file:".to_owned() +
         path.to_str().ok_or_else(|| format_err!("Malformed path: {:?}", path))? +
         "?mode=ro";
@@ -143,39 +146,71 @@ fn get_package_hrefs(path: &Path, arches: &Option<Vec<String>>, requirements: &O
         .map_err(Error::from)
 }
 
-fn index_package(
-    client: &http::Client, repo_uri: &str, p: &Package,
-) -> impl Future<Item=(), Error=Error> {
-    fetch_file(client, repo_uri, &p.location_href, &repomd::Checksum {
-        tpe: p.checksum_type.to_owned(),
-        hexdigest: p.pkg_id.to_owned(),
-    }).and_then(|path| {
-        tokio::fs::File::open(path.clone())
-            .with_context(move |_| format!("Could not open {:?}", path))
-            .map_err(Error::from)
-    }).and_then(|file| {
-        rpm::read_lead(file, 0)
-    }).and_then(|(file, pos, _rpm_lead)| {
-        rpm::read_full_header(file, pos)
-    }).and_then(|(file, pos, _rpm_signature_header)| {
-        rpm::read_full_header(file, pos)
-    }).and_then(|(file, pos, rpm_header)|
-                 -> Box<Future<Item=_, Error=_> + Send> {
-        let format = try_future!(rpm_header.get_string_tag(1124, "cpio"));
-        if format != "cpio" {
-            return Box::new(failed(format_err!("Unsupported RPM payload format")));
-        }
-        let coding = try_future!(rpm_header.get_string_tag(1125, "gzip"));
-        let r: Box<AsyncRead + Send> = match coding.as_ref() {
-            "xz" => Box::new(XzDecoder::new(file)),
-            _ => return Box::new(failed(format_err!("Unsupported RPM payload coding"))),
-        };
-        Box::new(cpio::read_header(r, pos)
-            .and_then(|(r, pos, cpio_header)|
-                cpio::read_name(r, pos, cpio_header.c_namesize as usize)))
-    }).and_then(|(_r, _pos, _name)| {
-        ok(())
-    })
+#[macro_export]
+macro_rules! await_old {
+    ( $f:expr ) => {
+        await!($f.into_awaitable())
+    }
+}
+
+async fn index_package(
+    client: &http::Client, repo_uri: String, p: Package,
+) -> Result<(), Error> {
+    let path = await_old!(fetch_file(&client, &repo_uri, &p.location_href, &repomd::Checksum {
+            tpe: p.checksum_type.to_owned(),
+            hexdigest: p.pkg_id.to_owned(),
+        }))?;
+    let file = await_old!(tokio::fs::File::open(path.clone())
+        .with_context(move |_| format!("Could not open {:?}", path))
+        .map_err(Error::from))?;
+    let (file, pos, _rpm_lead) = await_old!(rpm::read_lead(file, 0))?;
+    let (file, pos, _rpm_signature_header) = await_old!(rpm::read_full_header(file, pos))?;
+    let (file, pos, rpm_header) = await_old!(rpm::read_full_header(file, pos))?;
+    let format = rpm_header.get_string_tag(1124, "cpio")?;
+    if format != "cpio" {
+        bail!("Unsupported RPM payload format");
+    }
+    let coding = rpm_header.get_string_tag(1125, "gzip")?;
+    let r: Box<AsyncRead + Send> = match coding.as_ref() {
+        "xz" => Box::new(XzDecoder::new(file)),
+        _ => bail!("Unsupported RPM payload coding"),
+    };
+    let (r, pos, cpio_header) = await_old!(cpio::read_header(r, pos))?;
+    let c_namesize = cpio_header.c_namesize as usize;
+    let (_r, _pos, _cpio_name) = await_old!(cpio::read_name(r, pos, c_namesize))?;
+    Ok(())
+}
+
+async fn index_repo(
+    conn: SqliteConnection,
+    client: http::Client,
+    repo_uri: String,
+    arches: Option<Vec<String>>,
+    requirements: Option<Vec<String>>,
+    jobs: usize,
+) -> Result<(), Error> {
+    let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
+    let repomd_uri = repomd_uri_str.parse::<hyper::Uri>()
+        .context(format!("Malformed URI: {}", repomd_uri_str))?;
+    let doc = await_old!(fetch_repomd(&client, &repomd_uri))?;
+    let primary_db_data = doc.data
+        .iter()
+        .find(|data| data.tpe == "primary_db")
+        .ok_or_else(|| format_err!(r#"Missing <data type="primary_db">"#))?;
+    persist_repomd(&conn, &repo_uri, &primary_db_data)?;
+    let open_checksum = primary_db_data.open_checksum
+        .as_ref()
+        .ok_or_else(|| format_err!("Missing <open-checksum>"))?;
+    let primary_db_path = await_old!(fetch_file(
+        &client, &repo_uri, &primary_db_data.location.href, &open_checksum))?;
+    let packages = get_packages(&primary_db_path, &arches, &requirements)?;
+    let index_packages = iter_ok(packages)
+        .map(|package| tokio_async_await::compat::backward::Compat::new(index_package(
+            &client, repo_uri.to_owned(), package)))
+        .buffer_unordered(jobs)
+        .collect();
+    await_old!(index_packages)?;
+    Ok(())
 }
 
 fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
@@ -217,38 +252,9 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         .context(format!("SqliteConnection::establish({}) failed", database_url)));
     try_future!(run_pending_migrations(&conn)
         .context("run_pending_migrations() failed"));
-    let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
-    let repomd_uri = try_future!(repomd_uri_str.parse::<hyper::Uri>()
-        .context(format!("Malformed URI: {}", repomd_uri_str)));
     let client = try_future!(http::make_client());
-    Box::new(fetch_repomd(&client, &repomd_uri)
-        .and_then({
-            let repo_uri = repo_uri.to_owned();
-            move |doc| -> Box<Future<Item=(http::Client, PathBuf), Error=Error> + Send> {
-                let primary_db_data = try_future!(doc.data
-                    .iter()
-                    .find(|data| data.tpe == "primary_db")
-                    .ok_or_else(|| format_err!(r#"Missing <data type="primary_db">"#)));
-                try_future!(persist_repomd(&conn, &repo_uri, &primary_db_data));
-                let open_checksum = try_future!(primary_db_data.open_checksum
-                    .as_ref()
-                    .ok_or_else(|| format_err!("Missing <open-checksum>")));
-                let primary_db_href = &primary_db_data.location.href;
-                Box::new(fetch_file(&client, &repo_uri, primary_db_href, &open_checksum)
-                    .map(|path| (client, path)))
-            }
-        })
-        .and_then({
-            let repo_uri = repo_uri.to_owned();
-            move |(client, path)| -> Box<Future<Item=(), Error=Error> + Send> {
-                let package_hrefs = try_future!(get_package_hrefs(&path, &arches, &requirements));
-                Box::new(iter_ok(package_hrefs)
-                    .map(move |p| index_package(&client, &repo_uri, &p))
-                    .buffer_unordered(jobs)
-                    .collect()
-                    .map(|_| ()))
-            }
-        }))
+    Box::new(tokio_async_await::compat::backward::Compat::new(index_repo(
+        conn, client, repo_uri.to_owned(), arches, requirements, jobs)))
 }
 
 fn main() -> Result<(), Error> {

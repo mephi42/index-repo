@@ -26,7 +26,8 @@ serde-xml-rs = "0.3.1"
 sha2 = "0.8.0"
 smallvec = "0.6.9"
 tempfile = "3.0.7"
-tokio = "0.1.15"
+tokio = { version = "0.1.15", features = ["async-await-preview"] }
+tokio-async-await = "0.1.6"
 tokio-io = "0.1.11"
 xz2 = { version = "0.1.6", features = ["tokio"] }
 
