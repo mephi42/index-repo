@@ -1,6 +1,10 @@
+#![feature(async_await, await_macro, futures_api)]
+
 #[macro_use]
 extern crate diesel;
 
+#[macro_use]
+pub mod async_await;
 #[macro_use]
 pub mod errors;
 

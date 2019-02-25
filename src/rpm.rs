@@ -167,7 +167,7 @@ impl FullHeader {
             .collect::<Vec<_>>())
             .context("RPM index entry points to malformed UTF-8")
             .map_err(Error::from)
-            .map(|s| s.to_owned())
+            .map(std::borrow::ToOwned::to_owned)
     }
 }
 

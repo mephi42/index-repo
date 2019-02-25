@@ -2,6 +2,8 @@
 
 #[macro_use]
 extern crate index_repo;
+#[macro_use]
+extern crate log;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -22,7 +24,6 @@ use hyper::rt::Future;
 use itertools::Itertools;
 use smallvec::SmallVec;
 use tokio::runtime::Runtime;
-use tokio_async_await::compat::forward::IntoAwaitable;
 use tokio_io::AsyncRead;
 use xz2::read::XzDecoder;
 
@@ -146,16 +147,10 @@ fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option
         .map_err(Error::from)
 }
 
-#[macro_export]
-macro_rules! await_old {
-    ( $f:expr ) => {
-        await!($f.into_awaitable())
-    }
-}
-
 async fn index_package(
     client: &http::Client, repo_uri: String, p: Package,
 ) -> Result<(), Error> {
+    info!("Indexing {}...", p.name);
     let path = await_old!(fetch_file(&client, &repo_uri, &p.location_href, &repomd::Checksum {
             tpe: p.checksum_type.to_owned(),
             hexdigest: p.pkg_id.to_owned(),
@@ -165,20 +160,26 @@ async fn index_package(
         .map_err(Error::from))?;
     let (file, pos, _rpm_lead) = await_old!(rpm::read_lead(file, 0))?;
     let (file, pos, _rpm_signature_header) = await_old!(rpm::read_full_header(file, pos))?;
-    let (file, pos, rpm_header) = await_old!(rpm::read_full_header(file, pos))?;
+    let (file, mut pos, rpm_header) = await_old!(rpm::read_full_header(file, pos))?;
     let format = rpm_header.get_string_tag(1124, "cpio")?;
     if format != "cpio" {
         bail!("Unsupported RPM payload format");
     }
     let coding = rpm_header.get_string_tag(1125, "gzip")?;
-    let r: Box<AsyncRead + Send> = match coding.as_ref() {
+    let mut a: Box<AsyncRead + Send> = match coding.as_ref() {
         "xz" => Box::new(XzDecoder::new(file)),
         _ => bail!("Unsupported RPM payload coding"),
     };
-    let (r, pos, cpio_header) = await_old!(cpio::read_header(r, pos))?;
-    let c_namesize = cpio_header.c_namesize as usize;
-    let (_r, _pos, _cpio_name) = await_old!(cpio::read_name(r, pos, c_namesize))?;
-    Ok(())
+    loop {
+        let (local_a, local_pos, entry) = await!(cpio::read_entry(a, pos))?;
+        let (_cpio_header, cpio_name, _cpio_data) = match entry {
+            Some(t) => t,
+            None => break Ok(()),
+        };
+        debug!("Indexing {}:{}...", p.name, cpio_name);
+        a = local_a;
+        pos = local_pos;
+    }
 }
 
 async fn index_repo(
@@ -258,6 +259,7 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
 }
 
 fn main() -> Result<(), Error> {
+    env_logger::init();
     let mut runtime = Runtime::new()?;
     runtime.block_on(bootstrap())?;
     runtime

@@ -1,3 +1,5 @@
+use std::io::{Seek, Write};
+use std::fs::File;
 use std::str::from_utf8;
 use std::u64;
 
@@ -5,10 +7,12 @@ use failure::{Error, format_err, ResultExt};
 use futures::Future;
 use futures::future::result;
 use nom::{apply, do_parse, error_position, named, tag, take};
+use tempfile::tempfile;
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 
 use crate::errors::FutureExt;
+use std::io::SeekFrom;
 
 fn parse_u64(i: &[u8], n: usize) -> nom::IResult<&[u8], u64> {
     do_parse!(i, b: take!(n) >> (b))
@@ -99,4 +103,34 @@ pub fn read_name<A: AsyncRead + Send + 'static>(
             .context("Malformed CPIO file name")
             .map_err(Error::from)))
         .map(move |(a, s)| (a, pos + size + padding, s))
+}
+
+pub async fn read_entry<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> Result<(A, usize, Option<(Header, String, File)>), Error> {
+    let (a, pos, header) = await_old!(read_header(a, pos))?;
+    let c_namesize = header.c_namesize as usize;
+    let (mut a, mut pos, name) = await_old!(read_name(a, pos, c_namesize))?;
+    if name == "TRAILER!!!" {
+        return Ok((a, pos, None));
+    }
+    let mut tmp = tempfile()?;
+    let mut remaining = header.c_filesize as usize;
+    let mut buf = vec![0u8; 8192];
+    while remaining > 0 {
+        if remaining < buf.len() {
+            buf.truncate(remaining);
+        }
+        let (local_a, local_buf, n) = await_old!(tokio_io::io::read(a, buf))?;
+        tmp.write_all(&local_buf[0..n])?;
+        remaining -= n;
+        pos += n;
+        a = local_a;
+        buf = local_buf;
+    }
+    tmp.seek(SeekFrom::Start(0))?;
+    let padding = ((pos + 3) & !3) - pos;
+    let (a, _) = await_old!(tokio_io::io::read_exact(a, vec![0u8; padding]))?;
+    pos += padding;
+    Ok((a, pos, Some((header, name, tmp))))
 }
