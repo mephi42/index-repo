@@ -1,4 +1,4 @@
-use failure::{Error, ResultExt};
+use failure::{Error, format_err, ResultExt};
 use futures::future::{failed, ok};
 use hyper::rt::Future;
 use hyper_tls::HttpsConnector;

@@ -1,9 +1,10 @@
 use std::str::from_utf8;
 use std::u64;
 
-use failure::Error;
+use failure::{Error, format_err};
 use futures::Future;
 use futures::future::result;
+use nom::{apply, do_parse, error_position, named, tag, take};
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 

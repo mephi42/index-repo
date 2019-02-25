@@ -1,7 +1,7 @@
 use std::fs::{create_dir_all, File};
 use std::path::Path;
 
-use failure::{Error, ResultExt};
+use failure::{bail, Error, ResultExt};
 
 pub fn create_file_all(path: &Path) -> Result<File, Error> {
     let parent_path = match path.parent() {

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::str::from_utf8;
 
-use failure::{Error, ResultExt};
+use arrayref::array_ref;
+use failure::{bail, Error, format_err, ResultExt};
 use futures::{Future, Stream};
 use futures::future::result;
-use nom::{be_u16, be_u32, be_u8};
+use nom::{be_u16, be_u32, be_u8, do_parse, named, tag, take};
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 

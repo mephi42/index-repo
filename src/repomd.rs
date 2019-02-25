@@ -1,6 +1,7 @@
 use std::io::Read;
 
 use failure::{Error, ResultExt, SyncFailure};
+use serde_derive::Deserialize;
 use serde_xml_rs::from_reader;
 
 #[derive(Debug, Deserialize, PartialEq)]

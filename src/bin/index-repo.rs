@@ -1,20 +1,5 @@
-extern crate bytes;
-extern crate clap;
-extern crate diesel;
-extern crate diesel_migrations;
-extern crate dotenv;
-#[macro_use]
-extern crate failure;
-extern crate futures;
-extern crate hyper;
 #[macro_use]
 extern crate index_repo;
-extern crate itertools;
-extern crate smallvec;
-extern crate tempfile;
-extern crate tokio;
-extern crate tokio_io;
-extern crate xz2;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -27,7 +12,7 @@ use diesel::query_source::joins::{Inner, Join};
 use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
-use failure::{Error, ResultExt};
+use failure::{Error, format_err, ResultExt};
 use futures::future::{failed, ok, result};
 use futures::Stream;
 use futures::stream::iter_ok;

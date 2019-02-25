@@ -1,3 +1,5 @@
+use diesel::Queryable;
+
 #[derive(Queryable)]
 pub struct Repo {
     pub id: i32,

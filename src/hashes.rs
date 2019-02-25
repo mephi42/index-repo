@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use failure::{Error, ResultExt};
+use failure::{bail, Error, ResultExt};
 use sha2::{Digest, Sha256};
 
 trait Hash {

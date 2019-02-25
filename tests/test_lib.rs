@@ -1,5 +1,3 @@
-extern crate index_repo;
-
 #[cfg(test)]
 mod test {
     use failure::Error;

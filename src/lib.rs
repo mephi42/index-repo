@@ -1,22 +1,5 @@
 #[macro_use]
-extern crate arrayref;
-#[macro_use]
 extern crate diesel;
-#[macro_use]
-extern crate failure;
-extern crate futures;
-extern crate hex;
-extern crate hyper;
-extern crate hyper_tls;
-#[macro_use]
-extern crate nom;
-extern crate serde;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_xml_rs;
-extern crate sha2;
-extern crate tokio;
-extern crate tokio_io;
 
 #[macro_use]
 pub mod errors;
