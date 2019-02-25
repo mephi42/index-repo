@@ -16,10 +16,10 @@ use failure::{Error, format_err, ResultExt};
 use futures::future::{failed, ok, result};
 use futures::Stream;
 use futures::stream::iter_ok;
-use hyper::rt;
 use hyper::rt::Future;
 use itertools::Itertools;
 use smallvec::SmallVec;
+use tokio::runtime::Runtime;
 use tokio_io::AsyncRead;
 use xz2::read::XzDecoder;
 
@@ -247,9 +247,12 @@ fn bootstrap() -> Box<Future<Item=(), Error=Error> + Send> {
         }))
 }
 
-fn main() {
-    rt::run(Box::new(bootstrap().map_err(|e| {
-        eprintln!("{}", e);
-        std::process::exit(1);
-    })));
+fn main() -> Result<(), Error> {
+    let mut runtime = Runtime::new()?;
+    runtime.block_on(bootstrap())?;
+    runtime
+        .shutdown_now()
+        .wait()
+        .map_err(|_| format_err!("Runtime::shutdown_now() failed"))?;
+    Ok(())
 }
