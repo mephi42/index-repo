@@ -2,8 +2,6 @@
 
 #[macro_use]
 extern crate index_repo;
-#[macro_use]
-extern crate log;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -22,6 +20,7 @@ use futures::Stream;
 use futures::stream::iter_ok;
 use hyper::rt::Future;
 use itertools::Itertools;
+use log::{info, debug};
 use smallvec::SmallVec;
 use tokio::runtime::Runtime;
 use tokio_io::AsyncRead;
@@ -86,6 +85,7 @@ fn fetch_file(client: &http::Client, repo_uri: &str, href: &str, open_checksum: 
               -> Box<Future<Item=PathBuf, Error=Error> + Send> {
     let decoder = Decoder::from_href(href);
     let path = decoder.path().to_owned();
+    debug!("Hashing file {}...", path.to_string_lossy());
     if let Ok(hexdigest) = hashes::hexdigest_path(&path, &open_checksum.tpe) {
         if hexdigest == open_checksum.hexdigest {
             return Box::new(ok(path));
@@ -116,6 +116,7 @@ fn like_from_wildcard(s: &str) -> String {
 
 fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option<Vec<String>>)
                 -> Result<Vec<Package>, Error> {
+    info!("Reading package lists...");
     let database_url = "file:".to_owned() +
         path.to_str().ok_or_else(|| format_err!("Malformed path: {:?}", path))? +
         "?mode=ro";
@@ -150,7 +151,7 @@ fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option
 async fn index_package(
     client: &http::Client, repo_uri: String, p: Package,
 ) -> Result<(), Error> {
-    info!("Indexing {}...", p.name);
+    info!("Indexing package {}/{}...", &repo_uri, &p.location_href);
     let path = await_old!(fetch_file(&client, &repo_uri, &p.location_href, &repomd::Checksum {
             tpe: p.checksum_type.to_owned(),
             hexdigest: p.pkg_id.to_owned(),
@@ -176,7 +177,7 @@ async fn index_package(
             Some(t) => t,
             None => break Ok(()),
         };
-        debug!("Indexing {}:{}...", p.name, cpio_name);
+        debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
         a = local_a;
         pos = local_pos;
     }
@@ -190,6 +191,7 @@ async fn index_repo(
     requirements: Option<Vec<String>>,
     jobs: usize,
 ) -> Result<(), Error> {
+    info!("Indexing repo {}...", &repo_uri);
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
     let repomd_uri = repomd_uri_str.parse::<hyper::Uri>()
         .context(format!("Malformed URI: {}", repomd_uri_str))?;

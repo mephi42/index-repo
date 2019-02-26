@@ -2,6 +2,7 @@ use failure::{Error, format_err, ResultExt};
 use futures::future::{failed, ok};
 use hyper::rt::Future;
 use hyper_tls::HttpsConnector;
+use log::info;
 
 use crate::errors::FutureExt;
 
@@ -16,6 +17,7 @@ pub fn make_client() -> Result<Client, Error> {
 
 pub fn checked_fetch(client: &Client, uri: &hyper::Uri)
                      -> impl Future<Item=hyper::Response<hyper::Body>, Error=Error> {
+    info!("Fetching {}...", uri);
     client.get(uri.clone())
         .with_context({
             let uri = uri.clone();
