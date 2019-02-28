@@ -1,6 +1,4 @@
-use failure::{Error, format_err, ResultExt};
-use futures::future::{failed, ok};
-use hyper::rt::Future;
+use failure::{bail, Error, ResultExt};
 use hyper_tls::HttpsConnector;
 use log::info;
 
@@ -15,25 +13,19 @@ pub fn make_client() -> Result<Client, Error> {
     Ok(hyper::Client::builder().build::<_, hyper::Body>(https))
 }
 
-pub fn checked_fetch(client: &Client, uri: &hyper::Uri)
-                     -> impl Future<Item=hyper::Response<hyper::Body>, Error=Error> {
-    info!("Fetching {}...", uri);
-    client.get(uri.clone())
+pub async fn checked_fetch(
+    client: &Client, uri: hyper::Uri,
+) -> Result<hyper::Response<hyper::Body>, Error> {
+    info!("Fetching {}...", &uri);
+    let response = await_old!(client.get(uri.clone())
         .with_context({
             let uri = uri.clone();
-            move |_| format!("Failed to fetch {}", uri)
-        })
-        .map_err(Error::from)
-        .and_then({
-            let uri = uri.clone();
-            move |response| {
-                let status = response.status();
-                if status.is_success() {
-                    Box::new(ok(response))
-                } else {
-                    Box::new(failed(format_err!(
-                        "Failed to fetch {}: status-code {}", uri, status)))
-                }
-            }
-        })
+            move |_| format!("Failed to fetch {}", &uri)
+        }))?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(response)
+    } else {
+        bail!("Failed to fetch {}: status-code {}", &uri, status);
+    }
 }

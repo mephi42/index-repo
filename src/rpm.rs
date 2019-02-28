@@ -5,9 +5,10 @@ use arrayref::array_ref;
 use failure::{bail, Error, format_err, ResultExt};
 use futures::{Future, Stream};
 use futures::future::result;
-use nom::{be_u16, be_u32, be_u8, do_parse, named, tag, take};
+use nom::{be_u16, be_u32, be_u8, call, do_parse, named, tag, take};
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
+use xz2::read::XzDecoder;
 
 use crate::errors::FutureExt;
 
@@ -190,4 +191,22 @@ pub fn read_full_header<A: AsyncRead + Send + 'static>(
             .map_err(Error::from)
             .map(move |(a, store)| (
                 a, pos + header.store_size as usize, FullHeader { header, index_entries, store })))
+}
+
+pub async fn read_all_headers<A: AsyncRead + Send + 'static>(
+    a: A,
+) -> Result<(Box<AsyncRead + Send + 'static>, usize, Lead, FullHeader, FullHeader), Error> {
+    let (a, pos, lead) = await_old!(read_lead(a, 0))?;
+    let (a, pos, signature_header) = await_old!(read_full_header(a, pos))?;
+    let (a, pos, header) = await_old!(read_full_header(a, pos))?;
+    let format = header.get_string_tag(1124, "cpio")?;
+    if format != "cpio" {
+        bail!("Unsupported RPM payload format");
+    }
+    let coding = header.get_string_tag(1125, "gzip")?;
+    let a: Box<AsyncRead + Send + 'static> = match coding.as_ref() {
+        "xz" => Box::new(XzDecoder::new(a)),
+        _ => bail!("Unsupported RPM payload coding"),
+    };
+    Ok((a, pos, lead, signature_header, header))
 }

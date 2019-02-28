@@ -3,16 +3,6 @@ use std::fmt::Display;
 use failure::{Context, Fail};
 use futures::{Future, Stream};
 
-#[macro_export]
-macro_rules! try_future {
-    ( $x:expr ) => {
-        match $x {
-            Ok(t) => t,
-            Err(e) => return Box::new(futures::future::failed(e.into())),
-        }
-    }
-}
-
 pub trait FutureExt<T, E> {
     fn context<D>(self, context: D) -> Box<Future<Item=T, Error=Context<D>> + Send> where
         D: Display + Send + Sync + 'static,

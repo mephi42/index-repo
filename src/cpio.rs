@@ -1,5 +1,6 @@
-use std::io::{Seek, Write};
 use std::fs::File;
+use std::io::{Seek, Write};
+use std::io::SeekFrom;
 use std::str::from_utf8;
 use std::u64;
 
@@ -12,7 +13,6 @@ use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 
 use crate::errors::FutureExt;
-use std::io::SeekFrom;
 
 fn parse_u64(i: &[u8], n: usize) -> nom::IResult<&[u8], u64> {
     do_parse!(i, b: take!(n) >> (b))

@@ -4,7 +4,7 @@ use failure::{Error, ResultExt, SyncFailure};
 use serde_derive::Deserialize;
 use serde_xml_rs::from_reader;
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Checksum {
     #[serde(rename = "type")]
     pub tpe: String,
