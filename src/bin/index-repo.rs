@@ -4,6 +4,8 @@
 extern crate index_repo;
 
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use bytes::buf::Buf;
@@ -19,7 +21,7 @@ use futures::Stream;
 use futures::stream::iter_ok;
 use hyper::rt::Future;
 use itertools::Itertools;
-use log::{debug, info};
+use log::{debug, info, warn};
 use smallvec::SmallVec;
 
 use index_repo::cpio;
@@ -140,6 +142,20 @@ fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option
         .map_err(Error::from)
 }
 
+fn index_elf_file(mut file: File) -> Result<(), Error> {
+    let mut elf_bytes = Vec::new();
+    file.read_to_end(&mut elf_bytes)?;
+    let _elf = goblin::Object::parse(&elf_bytes)?;
+    Ok(())
+}
+
+fn index_file(mut file: File) -> Result<(), Error> {
+    match goblin::peek(&mut file) {
+        Ok(goblin::Hint::Elf(_)) => index_elf_file(file),
+        _ => Ok(()),  // ignore errors, because peek() fails on small files
+    }
+}
+
 async fn index_package(
     client: &http::Client, repo_uri: String, p: Package,
 ) -> Result<(), Error> {
@@ -159,11 +175,14 @@ async fn index_package(
     let mut pos = 0;
     loop {
         let (local_a, local_pos, entry) = await!(cpio::read_entry(a, pos))?;
-        let (_cpio_header, cpio_name, _cpio_data) = match entry {
+        let (_cpio_header, cpio_name, cpio_data) = match entry {
             Some(t) => t,
             None => break Ok(()),
         };
         debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
+        if let Err(e) = index_file(cpio_data) {
+            warn!("{}", e);
+        }
         a = local_a;
         pos = local_pos;
     }
