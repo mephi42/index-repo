@@ -1,1 +1,1 @@
-DROP TABLE repos
+DROP TABLE repos;

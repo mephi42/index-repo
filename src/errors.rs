@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use failure::{Context, Fail};
+use failure::{Context, Error, Fail};
 use futures::{Future, Stream};
 
 pub trait FutureExt<T, E> {
@@ -69,4 +69,18 @@ impl<S> StreamExt<<S as Stream>::Item, <S as Stream>::Error> for S where
             failure.context(context)
         }))
     }
+}
+
+pub fn format(e: &Error) -> String {
+    let mut s = String::from("Error: ");
+    let mut first = true;
+    for c in e.iter_chain() {
+        if first {
+            first = false;
+        } else {
+            s.push_str("\nCaused by: ")
+        }
+        s.push_str(&format!("{}", c));
+    }
+    s
 }

@@ -7,6 +7,7 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use bytes::buf::Buf;
 use clap::{app_from_crate, Arg, crate_authors, crate_description, crate_name, crate_version};
@@ -16,7 +17,7 @@ use diesel::query_source::joins::{Inner, Join};
 use diesel::sql_types;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
-use failure::{Error, format_err, ResultExt};
+use failure::{bail, Error, format_err, ResultExt};
 use futures::Stream;
 use futures::stream::iter_ok;
 use itertools::Itertools;
@@ -46,30 +47,48 @@ async fn fetch_repomd(
     repomd::Document::parse(body.reader())
 }
 
-fn persist_repomd(conn: &SqliteConnection, repo_uri: &str, primary_db_data: &repomd::Data)
-                  -> Result<(), Error> {
-    conn.transaction(|| {
-        let repo_vec = repos::table
-            .filter(repos::uri.eq(repo_uri))
+macro_rules! and_all {
+    ($x:expr) => {
+        $x
+    };
+    ($x:expr, $($xs:expr),+ $(,)?) => {{
+        $x.and(and_all![$($xs),*])
+    }};
+}
+
+macro_rules! insert_into_returning_rowid {
+    ($conn:expr, $table: expr, $rowid: expr, $desc: expr, ($($vs:expr),* $(,)?)) => {{
+        diesel::insert_into($table)
+            .values(($($vs,)*))
+            .execute($conn)
+            .context(format!("Failed to insert {}", $desc))?;
+        let rows = $table
+            .filter(and_all![$($vs),*])
+            .select($rowid)
             .limit(1)
-            .load::<Repo>(conn)
-            .context("Failed to query repo by uri")?;
-        match repo_vec.first() {
-            Some(repo) =>
-                diesel::update(repos::table.filter(repos::id.eq(repo.id)))
-                    .set(repos::primary_db.eq(&primary_db_data.location.href))
-                    .execute(conn)
-                    .context("Failed to update repo")?,
-            None =>
-                diesel::insert_into(repos::table)
-                    .values((
-                        repos::uri.eq(repo_uri),
-                        repos::primary_db.eq(&primary_db_data.location.href)))
-                    .execute(conn)
-                    .context("Failed to insert repo")?,
-        };
-        Ok(())
-    })
+            .load::<i32>($conn)
+            .context(format!("Failed to query {}", $desc))?;
+        match rows.as_slice() {
+            [rowid] => Ok(*rowid),
+            _ => bail!("Could not find {}", $desc),
+        }
+    }}
+}
+
+fn persist_repo(
+    conn: &SqliteConnection,
+    repo_uri: &str,
+    primary_db_data: &repomd::Data,
+) -> Result<i32, Error> {
+    insert_into_returning_rowid![
+        conn,
+        repos::table,
+        repos::id,
+        "a repo",
+        (
+            repos::uri.eq(repo_uri),
+            repos::primary_db.eq(&primary_db_data.location.href),
+        )]
 }
 
 async fn fetch_file(
@@ -141,22 +160,136 @@ fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option
         .map_err(Error::from)
 }
 
-fn index_elf_file(mut file: File) -> Result<(), Error> {
+fn persist_string(
+    conn: &SqliteConnection,
+    s: &str,
+) -> Result<i32, Error> {
+    let query = strings::table
+        .filter(strings::name.eq(s))
+        .select(strings::id)
+        .limit(1);
+    let rows = query
+        .load::<i32>(conn)
+        .context(format!("Failed to query a string"))?;
+    match rows.as_slice() {
+        [] => {
+            insert_into_returning_rowid![
+                conn,
+                strings::table,
+                strings::id,
+                "a string",
+                (strings::name.eq(s))]
+        }
+        [rowid] => Ok(*rowid),
+        _ => unreachable!(),
+    }
+}
+
+fn persist_elf_symbol(
+    conn: &SqliteConnection,
+    file_id: i32,
+    strtab: &goblin::strtab::Strtab,
+    sym: &goblin::elf::Sym,
+) -> Result<i32, Error> {
+    let name = strtab.get(sym.st_name)
+        .ok_or_else(|| format_err!(
+        "Failed to resolve an ELF symbol name (st_name={:x})", sym.st_name))??;
+    let name_id = persist_string(conn, name)?;
+    insert_into_returning_rowid![
+        conn,
+        elf_symbols::table,
+        elf_symbols::id,
+        "an ELF symbol",
+        (
+            elf_symbols::file_id.eq(file_id),
+            elf_symbols::name_id.eq(name_id),
+            elf_symbols::st_info.eq(sym.st_info as i32),
+            elf_symbols::st_other.eq(sym.st_other as i32),
+        )]
+}
+
+fn index_elf_file(
+    conn: &Mutex<SqliteConnection>,
+    file_id: i32,
+    mut file: File,
+) -> Result<(), Error> {
     let mut elf_bytes = Vec::new();
     file.read_to_end(&mut elf_bytes)?;
-    let _elf = goblin::Object::parse(&elf_bytes)?;
+    let elf = match goblin::Object::parse(&elf_bytes) {
+        Ok(goblin::Object::Elf(t)) => t,
+        _ => return Ok(()), // ignore errors - peek() could have been mistaken
+    };
+    for sym in elf.dynsyms.iter() {
+        let conn = &*conn.lock().map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
+        let _symbol_id = match persist_elf_symbol(conn, file_id, &elf.dynstrtab, &sym) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("{}", index_repo::errors::format(&e));
+                continue;
+            }
+        };
+    }
     Ok(())
 }
 
-fn index_file(mut file: File) -> Result<(), Error> {
+fn persist_file(
+    conn: &SqliteConnection,
+    package_id: i32,
+    name: &str,
+) -> Result<i32, Error> {
+    insert_into_returning_rowid![
+        conn,
+        files::table,
+        files::id,
+        "a file",
+        (
+            files::package_id.eq(package_id),
+            files::name.eq(name),
+        )]
+}
+
+fn index_file(
+    conn: &Mutex<SqliteConnection>,
+    package_id: i32,
+    name: &str,
+    mut file: File,
+) -> Result<(), Error> {
+    let file_id = {
+        let conn = &*conn.lock().map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
+        persist_file(conn, package_id, name)?
+    };
     match goblin::peek(&mut file) {
-        Ok(goblin::Hint::Elf(_)) => index_elf_file(file),
+        Ok(goblin::Hint::Elf(_)) => index_elf_file(conn, file_id, file),
         _ => Ok(()),  // ignore errors, because peek() fails on small files
     }
 }
 
-async fn index_package(
-    client: &http::Client, repo_uri: String, p: RpmPackage,
+fn persist_package(
+    conn: &SqliteConnection,
+    repo_id: i32,
+    p: &RpmPackage,
+) -> Result<i32, Error> {
+    insert_into_returning_rowid![
+        conn,
+        packages::table,
+        packages::id,
+        "a package",
+        (
+            packages::repo_id.eq(repo_id),
+            packages::name.eq(&p.name),
+            packages::arch.eq(&p.arch),
+            packages::version.eq(&p.version),
+            packages::epoch.eq(&p.epoch),
+            packages::release.eq(&p.release),
+        )]
+}
+
+async fn index_package<'a>(
+    conn: &'a Mutex<SqliteConnection>,
+    repo_id: i32,
+    client: &'a http::Client,
+    repo_uri: String,
+    p: RpmPackage,
 ) -> Result<(), Error> {
     info!("Indexing package {}/{}...", &repo_uri, &p.location_href);
     let path = await!(fetch_file(
@@ -169,6 +302,10 @@ async fn index_package(
         }))?;
     let file = await_old!(tokio::fs::File::open(path.clone())
         .with_context(move |_| format!("Could not open {:?}", path)))?;
+    let package_id = {
+        let conn = &*conn.lock().map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
+        persist_package(conn, repo_id, &p)?
+    };
     let (mut a, _pos, _lead, _signature_header, _header) = await!(rpm::read_all_headers(file))?;
     let mut pos = 0;
     loop {
@@ -178,7 +315,7 @@ async fn index_package(
             None => break Ok(()),
         };
         debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
-        if let Err(e) = index_file(cpio_data) {
+        if let Err(e) = index_file(conn, package_id, &cpio_name, cpio_data) {
             warn!("{}", e);
         }
         a = local_a;
@@ -203,7 +340,7 @@ async fn index_repo(
         .iter()
         .find(|data| data.tpe == "primary_db")
         .ok_or_else(|| format_err!(r#"Missing <data type="primary_db">"#))?;
-    persist_repomd(&conn, &repo_uri, &primary_db_data)?;
+    let repo_id = persist_repo(&conn, &repo_uri, &primary_db_data)?;
     let open_checksum = primary_db_data.open_checksum
         .as_ref()
         .ok_or_else(|| format_err!("Missing <open-checksum>"))?
@@ -214,9 +351,10 @@ async fn index_repo(
         primary_db_data.location.href.clone(),
         open_checksum))?;
     let packages = get_packages(&primary_db_path, &arches, &requirements)?;
+    let conn = Mutex::new(conn);
     let index_packages = iter_ok(packages)
         .map(|package| tokio_async_await::compat::backward::Compat::new(index_package(
-            &client, repo_uri.clone(), package)))
+            &conn, repo_id, &client, repo_uri.clone(), package)))
         .buffer_unordered(jobs)
         .collect();
     await_old!(index_packages)?;
