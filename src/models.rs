@@ -8,7 +8,7 @@ pub struct Repo {
 }
 
 #[derive(Queryable)]
-pub struct Package {
+pub struct RpmPackage {
     #[column_name = "pkgKey"]
     pub pkg_key: i32,
     #[column_name = "pkgId"]

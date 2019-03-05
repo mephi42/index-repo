@@ -5,8 +5,6 @@ use std::str::from_utf8;
 use std::u64;
 
 use failure::{Error, format_err, ResultExt};
-use futures::Future;
-use futures::future::result;
 use nom::{apply, do_parse, error_position, named, tag, take};
 use tempfile::tempfile;
 use tokio_io::AsyncRead;
@@ -78,39 +76,35 @@ named!(parse_header<Header>,
         }))
 );
 
-pub fn read_header<A: AsyncRead + Send + 'static>(
+pub async fn read_header<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
-) -> impl Future<Item=(A, usize, Header), Error=Error> {
-    read_exact(a, vec![0u8; HEADER_SIZE])
-        .context("Could not read CPIO header")
-        .map_err(Error::from)
-        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_header(&buf)
-            .map(|(_, header)| header)
-            .map_err(|_| format_err!("Could not parse CPIO header - bad magic?")))
-            .map(move |header| (a, pos + HEADER_SIZE, header)))
+) -> Result<(A, usize, Header), Error> {
+    let (a, buf) = await_old!(read_exact(a, vec![0u8; HEADER_SIZE])
+        .context("Could not read CPIO header"))?;
+    let (_, header) = parse_header(&buf)
+        .map_err(|_| format_err!("Could not parse CPIO header - bad magic?"))?;
+    Ok((a, pos + HEADER_SIZE, header))
 }
 
-pub fn read_name<A: AsyncRead + Send + 'static>(
+pub async fn read_name<A: AsyncRead + Send + 'static>(
     a: A, pos: usize, size: usize,
-) -> impl Future<Item=(A, usize, String), Error=Error> {
+) -> Result<(A, usize, String), Error> {
     let end = pos + size;
     let padding = ((end + 3) & !3) - end;
-    read_exact(a, vec![0u8; size + padding])
-        .context("Could not read CPIO file name")
-        .map_err(Error::from)
-        .and_then(move |(a, name)| result(from_utf8(&name[..size - 1])
-            .map(|s| (a, s.to_owned()))
-            .context("Malformed CPIO file name")
-            .map_err(Error::from)))
-        .map(move |(a, s)| (a, pos + size + padding, s))
+    let (a, name) = await_old!(read_exact(a, vec![0u8; size + padding])
+        .context("Could not read CPIO file name"))?;
+    let s = from_utf8(&name[..size - 1])
+        .context("Malformed CPIO file name")?
+        .to_owned();
+    Ok((a, pos + size + padding, s))
 }
 
 pub async fn read_entry<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
 ) -> Result<(A, usize, Option<(Header, String, File)>), Error> {
-    let (a, pos, header) = await_old!(read_header(a, pos))?;
+    let (a, pos, header) = await!(read_header(a, pos))?;
     let c_namesize = header.c_namesize as usize;
-    let (mut a, mut pos, name) = await_old!(read_name(a, pos, c_namesize))?;
+    let (mut a, mut pos, name) = await!(read_name(a, pos, c_namesize))?;
     if name == "TRAILER!!!" {
         return Ok((a, pos, None));
     }

@@ -3,9 +3,7 @@ use std::str::from_utf8;
 
 use arrayref::array_ref;
 use failure::{bail, Error, format_err, ResultExt};
-use futures::{Future, Stream};
-use futures::future::result;
-use nom::{be_u16, be_u32, be_u8, call, do_parse, named, tag, take};
+use nom::{be_u16, be_u32, be_u8, do_parse, named, tag, take};
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
 use xz2::read::XzDecoder;
@@ -52,16 +50,14 @@ named!(parse_lead<Lead>,
         }))
 );
 
-pub fn read_lead<A: AsyncRead + Send + 'static>(
+pub async fn read_lead<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
-) -> impl Future<Item=(A, usize, Lead), Error=Error> {
-    read_exact(a, vec![0u8; LEAD_SIZE])
-        .context("Could not read RPM lead")
-        .map_err(Error::from)
-        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_lead(&buf)
-            .map(|(_, lead)| lead)
-            .map_err(|_| format_err!("Could not parse RPM lead - bad magic?")))
-            .map(move |lead| (a, pos + LEAD_SIZE, lead)))
+) -> Result<(A, usize, Lead), Error> {
+    let (a, buf) = await_old!(read_exact(a, vec![0u8; LEAD_SIZE])
+        .context("Could not read RPM lead"))?;
+    let (_, lead) = parse_lead(&buf)
+        .map_err(|_| format_err!("Could not parse RPM lead - bad magic?"))?;
+    Ok((a, pos + LEAD_SIZE, lead))
 }
 
 static HEADER_MAGIC: [u8; 3] = [0x8e, 0xad, 0xe8];
@@ -92,20 +88,17 @@ named!(parse_header<Header>,
         }))
 );
 
-pub fn read_header<A: AsyncRead + Send + 'static>(
+pub async fn read_header<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
-) -> impl Future<Item=(A, usize, Header), Error=Error> {
+) -> Result<(A, usize, Header), Error> {
     let padding = ((pos + 7) & !7) - pos;
-    read_exact(a, vec![0u8; padding])
-        .context("Could not pad RPM header")
-        .map_err(Error::from)
-        .and_then(move |(a, _)| read_exact(a, vec![0u8; HEADER_SIZE])
-            .context("Could not read RPM header")
-            .map_err(Error::from))
-        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_header(&buf)
-            .map(|(_, header)| header)
-            .map_err(|_| format_err!("Could not parse RPM header - bad magic?")))
-            .map(move |header| (a, pos + padding + HEADER_SIZE, header)))
+    let (a, _) = await_old!(read_exact(a, vec![0u8; padding])
+        .context("Could not pad RPM header"))?;
+    let (a, buf) = await_old!(read_exact(a, vec![0u8; HEADER_SIZE])
+            .context("Could not read RPM header"))?;
+    let (_, header) = parse_header(&buf)
+        .map_err(|_| format_err!("Could not parse RPM header - bad magic?"))?;
+    Ok((a, pos + padding + HEADER_SIZE, header))
 }
 
 pub struct IndexEntry {
@@ -131,16 +124,14 @@ named!(parse_index_entry<IndexEntry>,
         }))
 );
 
-pub fn read_index_entry<A: AsyncRead + Send + 'static>(
+pub async fn read_index_entry<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
-) -> impl Future<Item=(A, usize, IndexEntry), Error=Error> {
-    read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
-        .context("Could not read RPM index entry")
-        .map_err(Error::from)
-        .and_then(move |(a, buf): (A, Vec<u8>)| result(parse_index_entry(&buf)
-            .map(|(_, index_entry)| index_entry)
-            .map_err(|_| format_err!("Could not parse RPM index entry")))
-            .map(move |index_entry| (a, pos + INDEX_ENTRY_SIZE, index_entry)))
+) -> Result<(A, usize, IndexEntry), Error> {
+    let (a, buf) = await_old!(read_exact(a, vec![0u8; INDEX_ENTRY_SIZE])
+        .context("Could not read RPM index entry"))?;
+    let (_, index_entry) = parse_index_entry(&buf)
+        .map_err(|_| format_err!("Could not parse RPM index entry"))?;
+    Ok((a, pos + INDEX_ENTRY_SIZE, index_entry))
 }
 
 pub struct FullHeader {
@@ -172,33 +163,28 @@ impl FullHeader {
     }
 }
 
-pub fn read_full_header<A: AsyncRead + Send + 'static>(
+pub async fn read_full_header<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
-) -> impl Future<Item=(A, usize, FullHeader), Error=Error> {
-    read_header(a, pos).and_then(|(a, pos, header)| {
-        let index_entries = HashMap::with_capacity(header.index_entry_count as usize);
-        futures::stream::iter_ok(0..header.index_entry_count)
-            .fold(((a, pos), index_entries), |((a, pos), mut index_entries), _| {
-                read_index_entry(a, pos).map(|(a, pos, index_entry)| {
-                    index_entries.insert(index_entry.tag, index_entry);
-                    ((a, pos), index_entries)
-                })
-            })
-            .map(|((a, pos), index_entries)| (a, pos, header, index_entries))
-    }).and_then(|(a, pos, header, index_entries)|
-        read_exact(a, vec![0u8; header.store_size as usize])
-            .context("Could not read RPM store")
-            .map_err(Error::from)
-            .map(move |(a, store)| (
-                a, pos + header.store_size as usize, FullHeader { header, index_entries, store })))
+) -> Result<(A, usize, FullHeader), Error> {
+    let (mut a, mut pos, header) = await!(read_header(a, pos))?;
+    let mut index_entries = HashMap::with_capacity(header.index_entry_count as usize);
+    for _ in 0..header.index_entry_count {
+        let (local_a, local_pos, index_entry) = await!(read_index_entry(a, pos))?;
+        index_entries.insert(index_entry.tag, index_entry);
+        a = local_a;
+        pos = local_pos;
+    }
+    let (a, store) = await_old!(read_exact(a, vec![0u8; header.store_size as usize])
+        .context("Could not read RPM store"))?;
+    Ok((a, pos + header.store_size as usize, FullHeader { header, index_entries, store }))
 }
 
 pub async fn read_all_headers<A: AsyncRead + Send + 'static>(
     a: A,
 ) -> Result<(Box<AsyncRead + Send + 'static>, usize, Lead, FullHeader, FullHeader), Error> {
-    let (a, pos, lead) = await_old!(read_lead(a, 0))?;
-    let (a, pos, signature_header) = await_old!(read_full_header(a, pos))?;
-    let (a, pos, header) = await_old!(read_full_header(a, pos))?;
+    let (a, pos, lead) = await!(read_lead(a, 0))?;
+    let (a, pos, signature_header) = await!(read_full_header(a, pos))?;
+    let (a, pos, header) = await!(read_full_header(a, pos))?;
     let format = header.get_string_tag(1124, "cpio")?;
     if format != "cpio" {
         bail!("Unsupported RPM payload format");

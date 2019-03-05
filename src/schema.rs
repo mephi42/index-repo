@@ -7,7 +7,8 @@ table! {
 }
 
 table! {
-    packages (pkgKey) {
+    #[sql_name="packages"]
+    rpm_packages (pkgKey) {
         pkgKey -> Integer,
         pkgId -> Text,
         name -> Text,
@@ -20,11 +21,12 @@ table! {
 
 table! {
     // FIXME: There is no primary key, so using an arbitrary column to make Diesel happy
-    requires (name) {
+    #[sql_name="requires"]
+    rpm_requires (name) {
         name -> Text,
         pkgKey -> Integer,
     }
 }
 
-joinable!(requires -> packages (pkgKey));
-allow_tables_to_appear_in_same_query!(requires, packages);
+joinable!(rpm_requires -> rpm_packages (pkgKey));
+allow_tables_to_appear_in_same_query!(rpm_requires, rpm_packages);

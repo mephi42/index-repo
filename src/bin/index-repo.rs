@@ -19,7 +19,6 @@ use dotenv::dotenv;
 use failure::{Error, format_err, ResultExt};
 use futures::Stream;
 use futures::stream::iter_ok;
-use hyper::rt::Future;
 use itertools::Itertools;
 use log::{debug, info, warn};
 use smallvec::SmallVec;
@@ -109,7 +108,7 @@ fn like_from_wildcard(s: &str) -> String {
 }
 
 fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option<Vec<String>>)
-                -> Result<Vec<Package>, Error> {
+                -> Result<Vec<RpmPackage>, Error> {
     info!("Reading package lists...");
     let database_url = "file:".to_owned() +
         path.to_str().ok_or_else(|| format_err!("Malformed path: {:?}", path))? +
@@ -117,27 +116,27 @@ fn get_packages(path: &Path, arches: &Option<Vec<String>>, requirements: &Option
     let conn = SqliteConnection::establish(&database_url)
         .with_context(|_| format!(
             "SqliteConnection::establish({}) failed", database_url))?;
-    let mut query = packages::table.into_boxed();
+    let mut query = rpm_packages::table.into_boxed();
     if let Some(requirements) = requirements {
         // https://stackoverflow.com/a/48712715/3832536
         // https://github.com/diesel-rs/diesel/issues/1544#issuecomment-363440046
         type B = Box<BoxableExpression<
-            Join<requires::table, packages::table, Inner>,
+            Join<rpm_requires::table, rpm_packages::table, Inner>,
             diesel::sqlite::Sqlite,
             SqlType=sql_types::Bool>>;
         let like: B = requirements
             .iter()
             .map(|r| -> B {
-                Box::new(requires::name.like(like_from_wildcard(r)))
+                Box::new(rpm_requires::name.like(like_from_wildcard(r)))
             }).fold1(|q, l| Box::new(q.or(l)))
             .unwrap();
-        query = query.filter(exists(requires::table.filter(
-            requires::pkgKey.eq(packages::pkgKey).and(like))));
+        query = query.filter(exists(rpm_requires::table.filter(
+            rpm_requires::pkgKey.eq(rpm_packages::pkgKey).and(like))));
     }
     if let Some(arches) = arches {
-        query = query.filter(packages::arch.eq_any(arches));
+        query = query.filter(rpm_packages::arch.eq_any(arches));
     }
-    query.load::<Package>(&conn)
+    query.load::<RpmPackage>(&conn)
         .context("Failed to query packages")
         .map_err(Error::from)
 }
@@ -157,7 +156,7 @@ fn index_file(mut file: File) -> Result<(), Error> {
 }
 
 async fn index_package(
-    client: &http::Client, repo_uri: String, p: Package,
+    client: &http::Client, repo_uri: String, p: RpmPackage,
 ) -> Result<(), Error> {
     info!("Indexing package {}/{}...", &repo_uri, &p.location_href);
     let path = await!(fetch_file(
@@ -169,8 +168,7 @@ async fn index_package(
             hexdigest: p.pkg_id.to_owned(),
         }))?;
     let file = await_old!(tokio::fs::File::open(path.clone())
-        .with_context(move |_| format!("Could not open {:?}", path))
-        .map_err(Error::from))?;
+        .with_context(move |_| format!("Could not open {:?}", path)))?;
     let (mut a, _pos, _lead, _signature_header, _header) = await!(rpm::read_all_headers(file))?;
     let mut pos = 0;
     loop {
