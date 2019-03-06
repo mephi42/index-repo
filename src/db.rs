@@ -155,6 +155,7 @@ fn persist_string(
         .load::<i32>(conn)
         .context(format!("Failed to query a string"))?;
     match rows.as_slice() {
+        [rowid] => Ok(*rowid),
         [] => {
             insert_into_returning_rowid![
                 conn,
@@ -163,8 +164,6 @@ fn persist_string(
                 "a string",
                 (strings::name.eq(s))]
         }
-            [rowid] =>
-        Ok(*rowid),
         _ => unreachable!(),
     }
 }

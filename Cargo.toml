@@ -31,6 +31,7 @@ smallvec = "0.6.9"
 tempfile = "3.0.7"
 tokio = { version = "0.1.16", features = ["async-await-preview"] }
 tokio-async-await = "0.1.6"
+tokio-executor = "0.1.6"
 tokio-io = "0.1.12"
 xz2 = { version = "0.1.6", features = ["tokio"] }
 

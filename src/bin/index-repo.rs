@@ -7,7 +7,7 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::buf::Buf;
 use clap::{app_from_crate, Arg, crate_authors, crate_description, crate_name, crate_version};
@@ -18,6 +18,7 @@ use failure::{Error, format_err, ResultExt};
 use futures::Stream;
 use futures::stream::iter_ok;
 use log::{debug, info, warn};
+use tokio_executor::DefaultExecutor;
 
 use index_repo::cpio;
 use index_repo::db;
@@ -102,10 +103,10 @@ fn index_file(
     }
 }
 
-async fn index_package<'a>(
-    conn: &'a Mutex<SqliteConnection>,
+async fn index_package(
+    conn: Arc<Mutex<SqliteConnection>>,
     repo_id: i32,
-    client: &'a http::Client,
+    client: http::Client,
     repo_uri: String,
     p: RpmPackage,
 ) -> Result<(), Error> {
@@ -133,7 +134,7 @@ async fn index_package<'a>(
             None => break Ok(()),
         };
         debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
-        if let Err(e) = index_file(conn, package_id, &cpio_name, cpio_data) {
+        if let Err(e) = index_file(&conn, package_id, &cpio_name, cpio_data) {
             warn!("{}", e);
         }
         a = local_a;
@@ -170,10 +171,14 @@ async fn index_repo(
         open_checksum))?;
     info!("Reading package lists...");
     let packages = db::get_packages(&primary_db_path, &arches, &requirements)?;
-    let conn = Mutex::new(conn);
+    let conn = Arc::new(Mutex::new(conn));
     let index_packages = iter_ok(packages)
-        .map(|package| tokio_async_await::compat::backward::Compat::new(index_package(
-            &conn, repo_id, &client, repo_uri.clone(), package)))
+        .map(move |package| {
+            let future = index_package(
+                conn.clone(), repo_id, client.clone(), repo_uri.clone(), package);
+            let compat_future = tokio_async_await::compat::backward::Compat::new(future);
+            futures::sync::oneshot::spawn(compat_future, &DefaultExecutor::current())
+        })
         .buffer_unordered(jobs)
         .collect();
     await_old!(index_packages)?;
