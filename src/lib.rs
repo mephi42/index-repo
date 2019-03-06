@@ -8,6 +8,7 @@ pub mod async_await;
 #[macro_use]
 pub mod errors;
 
+pub mod db;
 pub mod cpio;
 pub mod decoders;
 pub mod fs;
