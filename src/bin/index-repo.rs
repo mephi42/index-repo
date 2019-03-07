@@ -179,6 +179,8 @@ async fn index_repo(
         open_checksum))?;
     info!("Reading package lists...");
     let packages = db::get_packages(&primary_db_path, &arches, &requirements)?;
+    let packages_size: i64 = packages.iter().map(|p| p.size_package as i64).sum();
+    info!("Total size of RPMs: {}", pretty_bytes::converter::convert(packages_size as f64));
     let conn = Arc::new(Mutex::new(conn));
     let http_semaphore = Arc::new(Semaphore::new(jobs));
     let index_packages = join_all(packages
