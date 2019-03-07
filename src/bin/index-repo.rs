@@ -15,10 +15,12 @@ use diesel::prelude::*;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use failure::{Error, format_err, ResultExt};
+use futures::future::{join_all, poll_fn};
 use futures::Stream;
-use futures::stream::iter_ok;
 use log::{debug, info, warn};
+use scopeguard::defer;
 use tokio_executor::DefaultExecutor;
+use tokio_sync::semaphore::{Permit, Semaphore};
 
 use index_repo::cpio;
 use index_repo::db;
@@ -107,18 +109,24 @@ async fn index_package(
     conn: Arc<Mutex<SqliteConnection>>,
     repo_id: i32,
     client: http::Client,
+    http_semaphore: Arc<Semaphore>,
     repo_uri: String,
     p: RpmPackage,
 ) -> Result<(), Error> {
     info!("Indexing package {}/{}...", &repo_uri, &p.location_href);
-    let path = await!(fetch_file(
-        &client,
-        repo_uri.clone(),
-        p.location_href.clone(),
-        repomd::Checksum {
-            tpe: p.checksum_type.to_owned(),
-            hexdigest: p.pkg_id.to_owned(),
-        }))?;
+    let path = {
+        let mut permit = Permit::new();
+        await_old!(poll_fn(|| permit.poll_acquire(&http_semaphore)))?;
+        defer!(permit.release(&http_semaphore));
+        await!(fetch_file(
+            &client,
+            repo_uri.clone(),
+            p.location_href.clone(),
+            repomd::Checksum {
+                tpe: p.checksum_type.to_owned(),
+                hexdigest: p.pkg_id.to_owned(),
+            }))?
+    };
     let file = await_old!(tokio::fs::File::open(path.clone())
         .with_context(move |_| format!("Could not open {:?}", path)))?;
     let package_id = {
@@ -172,15 +180,20 @@ async fn index_repo(
     info!("Reading package lists...");
     let packages = db::get_packages(&primary_db_path, &arches, &requirements)?;
     let conn = Arc::new(Mutex::new(conn));
-    let index_packages = iter_ok(packages)
+    let http_semaphore = Arc::new(Semaphore::new(jobs));
+    let index_packages = join_all(packages
+        .into_iter()
         .map(move |package| {
             let future = index_package(
-                conn.clone(), repo_id, client.clone(), repo_uri.clone(), package);
+                conn.clone(),
+                repo_id,
+                client.clone(),
+                http_semaphore.clone(),
+                repo_uri.clone(),
+                package);
             let compat_future = tokio_async_await::compat::backward::Compat::new(future);
             futures::sync::oneshot::spawn(compat_future, &DefaultExecutor::current())
-        })
-        .buffer_unordered(jobs)
-        .collect();
+        }));
     await_old!(index_packages)?;
     Ok(())
 }
