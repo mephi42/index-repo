@@ -18,4 +18,5 @@ pub mod models;
 pub mod repomd;
 pub mod rpm;
 pub mod schema;
+pub mod sync;
 pub mod tokio;
