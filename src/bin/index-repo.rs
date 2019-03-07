@@ -31,6 +31,7 @@ use index_repo::http;
 use index_repo::models::*;
 use index_repo::repomd;
 use index_repo::rpm;
+use index_repo::sync::semaphore_acquire;
 
 async fn fetch_repomd<'a>(
     client: &'a http::Client,
@@ -49,10 +50,12 @@ async fn fetch_repomd<'a>(
 async fn fetch_file<'a>(
     client: &'a http::Client,
     http_semaphore: &'a Semaphore,
+    io_semaphore: &'a Semaphore,
     repo_uri: String,
     href: String,
     open_checksum: repomd::Checksum,
 ) -> Result<PathBuf, Error> {
+    let _io_guard = await!(semaphore_acquire(&io_semaphore))?;
     let decoder = Decoder::from_href(&href);
     let path = decoder.path().to_owned();
     debug!("Hashing file {}...", path.to_string_lossy());
@@ -115,12 +118,14 @@ async fn index_package(
     repo_id: i32,
     client: http::Client,
     http_semaphore: Arc<Semaphore>,
+    io_semaphore: Arc<Semaphore>,
     repo_uri: String,
     p: RpmPackage,
 ) -> Result<(), Error> {
     let path = await!(fetch_file(
         &client,
         &http_semaphore,
+        &io_semaphore,
         repo_uri.clone(),
         p.location_href.clone(),
         repomd::Checksum {
@@ -161,6 +166,7 @@ async fn index_repo(
 ) -> Result<(), Error> {
     info!("Indexing repo {}...", &repo_uri);
     let http_semaphore = Arc::new(Semaphore::new(jobs));
+    let io_semaphore = Arc::new(Semaphore::new(jobs));
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
     let repomd_uri = repomd_uri_str.parse::<hyper::Uri>()
         .context(format!("Malformed URI: {}", repomd_uri_str))?;
@@ -177,6 +183,7 @@ async fn index_repo(
     let primary_db_path = await!(fetch_file(
         &client,
         &http_semaphore,
+        &io_semaphore,
         repo_uri.clone(),
         primary_db_data.location.href.clone(),
         open_checksum))?;
@@ -193,6 +200,7 @@ async fn index_repo(
                 repo_id,
                 client.clone(),
                 http_semaphore.clone(),
+                io_semaphore.clone(),
                 repo_uri.clone(),
                 package);
             let compat_future = tokio_async_await::compat::backward::Compat::new(future);
