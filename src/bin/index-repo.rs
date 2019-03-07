@@ -15,12 +15,11 @@ use diesel::prelude::*;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use failure::{Error, format_err, ResultExt};
-use futures::future::{join_all, poll_fn};
+use futures::future::join_all;
 use futures::Stream;
 use log::{debug, info, warn};
-use scopeguard::defer;
 use tokio_executor::DefaultExecutor;
-use tokio_sync::semaphore::{Permit, Semaphore};
+use tokio_sync::semaphore::Semaphore;
 
 use index_repo::cpio;
 use index_repo::db;
@@ -33,10 +32,12 @@ use index_repo::models::*;
 use index_repo::repomd;
 use index_repo::rpm;
 
-async fn fetch_repomd(
-    client: &http::Client, repomd_uri: hyper::Uri,
+async fn fetch_repomd<'a>(
+    client: &'a http::Client,
+    semaphore: &'a Semaphore,
+    repomd_uri: hyper::Uri,
 ) -> Result<repomd::Document, Error> {
-    let response = await!(http::checked_fetch(client, repomd_uri.clone()))?;
+    let response = await!(http::checked_fetch(client, semaphore, repomd_uri.clone()))?;
     let body = await_old!(response
         .into_body()
         .concat2()
@@ -45,8 +46,12 @@ async fn fetch_repomd(
     repomd::Document::parse(body.reader())
 }
 
-async fn fetch_file(
-    client: &http::Client, repo_uri: String, href: String, open_checksum: repomd::Checksum,
+async fn fetch_file<'a>(
+    client: &'a http::Client,
+    http_semaphore: &'a Semaphore,
+    repo_uri: String,
+    href: String,
+    open_checksum: repomd::Checksum,
 ) -> Result<PathBuf, Error> {
     let decoder = Decoder::from_href(&href);
     let path = decoder.path().to_owned();
@@ -60,7 +65,7 @@ async fn fetch_file(
     let uri = uri_str.parse::<hyper::Uri>()
         .with_context(|_| format!("Malformed URI: {}", uri_str))?;
     let file = create_file_all(&path)?;
-    let response = await!(http::checked_fetch(client, uri))?;
+    let response = await!(http::checked_fetch(client, http_semaphore, uri))?;
     await_old!(decoder.decode_response(file, response))?;
     Ok(path)
 }
@@ -113,20 +118,16 @@ async fn index_package(
     repo_uri: String,
     p: RpmPackage,
 ) -> Result<(), Error> {
+    let path = await!(fetch_file(
+        &client,
+        &http_semaphore,
+        repo_uri.clone(),
+        p.location_href.clone(),
+        repomd::Checksum {
+            tpe: p.checksum_type.to_owned(),
+            hexdigest: p.pkg_id.to_owned(),
+        }))?;
     info!("Indexing package {}/{}...", &repo_uri, &p.location_href);
-    let path = {
-        let mut permit = Permit::new();
-        await_old!(poll_fn(|| permit.poll_acquire(&http_semaphore)))?;
-        defer!(permit.release(&http_semaphore));
-        await!(fetch_file(
-            &client,
-            repo_uri.clone(),
-            p.location_href.clone(),
-            repomd::Checksum {
-                tpe: p.checksum_type.to_owned(),
-                hexdigest: p.pkg_id.to_owned(),
-            }))?
-    };
     let file = await_old!(tokio::fs::File::open(path.clone())
         .with_context(move |_| format!("Could not open {:?}", path)))?;
     let package_id = {
@@ -159,10 +160,11 @@ async fn index_repo(
     jobs: usize,
 ) -> Result<(), Error> {
     info!("Indexing repo {}...", &repo_uri);
+    let http_semaphore = Arc::new(Semaphore::new(jobs));
     let repomd_uri_str = repo_uri.to_owned() + "/repodata/repomd.xml";
     let repomd_uri = repomd_uri_str.parse::<hyper::Uri>()
         .context(format!("Malformed URI: {}", repomd_uri_str))?;
-    let doc = await!(fetch_repomd(&client, repomd_uri))?;
+    let doc = await!(fetch_repomd(&client, &http_semaphore, repomd_uri))?;
     let primary_db_data = doc.data
         .iter()
         .find(|data| data.tpe == "primary_db")
@@ -174,6 +176,7 @@ async fn index_repo(
         .clone();
     let primary_db_path = await!(fetch_file(
         &client,
+        &http_semaphore,
         repo_uri.clone(),
         primary_db_data.location.href.clone(),
         open_checksum))?;
@@ -182,7 +185,6 @@ async fn index_repo(
     let packages_size: i64 = packages.iter().map(|p| p.size_package as i64).sum();
     info!("Total size of RPMs: {}", pretty_bytes::converter::convert(packages_size as f64));
     let conn = Arc::new(Mutex::new(conn));
-    let http_semaphore = Arc::new(Semaphore::new(jobs));
     let index_packages = join_all(packages
         .into_iter()
         .map(move |package| {

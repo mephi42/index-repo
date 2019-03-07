@@ -1,6 +1,9 @@
 use failure::{bail, Error, ResultExt};
+use futures::future::poll_fn;
 use hyper_tls::HttpsConnector;
 use log::info;
+use scopeguard::defer;
+use tokio_sync::semaphore::{Permit, Semaphore};
 
 use crate::errors::FutureExt;
 
@@ -13,9 +16,14 @@ pub fn make_client() -> Result<Client, Error> {
     Ok(hyper::Client::builder().build::<_, hyper::Body>(https))
 }
 
-pub async fn checked_fetch(
-    client: &Client, uri: hyper::Uri,
+pub async fn checked_fetch<'a>(
+    client: &'a Client,
+    semaphore: &'a Semaphore,
+    uri: hyper::Uri,
 ) -> Result<hyper::Response<hyper::Body>, Error> {
+    let mut permit = Permit::new();
+    await_old!(poll_fn(|| permit.poll_acquire(&semaphore)))?;
+    defer!(permit.release(&semaphore));
     info!("Fetching {}...", &uri);
     let response = await_old!(client.get(uri.clone())
         .with_context({
