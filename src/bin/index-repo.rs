@@ -84,16 +84,19 @@ fn index_elf_file(
         Ok(goblin::Object::Elf(t)) => t,
         _ => return Ok(()), // ignore errors - peek() could have been mistaken
     };
-    for sym in elf.dynsyms.iter() {
-        let conn = &*conn.lock().map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
-        let _symbol_id = match db::persist_elf_symbol(conn, file_id, &elf.dynstrtab, &sym) {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("{}", index_repo::errors::format(&e));
-                continue;
-            }
-        };
-    }
+    let conn = &*conn.lock().map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
+    conn.transaction(|| -> Result<(), Error> {
+        for sym in elf.dynsyms.iter() {
+            let _symbol_id = match db::persist_elf_symbol(conn, file_id, &elf.dynstrtab, &sym) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("{}", index_repo::errors::format(&e));
+                    continue;
+                }
+            };
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
