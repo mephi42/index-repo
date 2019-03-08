@@ -15,7 +15,7 @@ use diesel::prelude::*;
 use diesel_migrations::run_pending_migrations;
 use dotenv::dotenv;
 use failure::{Error, format_err, ResultExt};
-use futures::future::join_all;
+use futures::future::{Future, join_all};
 use futures::Stream;
 use log::{debug, info, warn};
 use tokio_executor::DefaultExecutor;
@@ -251,6 +251,11 @@ async fn bootstrap() -> Result<(), Error> {
     run_pending_migrations(&conn)
         .context("run_pending_migrations() failed")?;
     let client = http::make_client()?;
+    let monitor = tokio_async_await::compat::backward::Compat::new(
+        index_repo::metrics::monitor());
+    tokio::spawn(monitor.map_err(|e| {
+        warn!("{}", index_repo::errors::format(&e));
+    }));
     await!(index_repo(conn, client, repo_uri.to_owned(), arches, requirements, jobs))
 }
 

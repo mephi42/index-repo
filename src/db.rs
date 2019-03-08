@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::path::Path;
+use std::time::Instant;
 
 use diesel::dsl::exists;
 use diesel::prelude::*;
@@ -10,6 +11,7 @@ use failure::{bail, Error, format_err, ResultExt};
 use itertools::Itertools;
 use smallvec::SmallVec;
 
+use crate::metrics::update_metrics;
 use crate::models::*;
 use crate::repomd;
 use crate::schema::*;
@@ -153,11 +155,18 @@ fn query_strings<'a>(
     let sqlite_max_variable_number = 999;
     let strings_vec: Vec<&'a str> = Vec::from_iter(strings.iter().map(|s| *s));
     for chunk in strings_vec.chunks(sqlite_max_variable_number).into_iter() {
+        let t0 = Instant::now();
         let rows = strings::table
             .filter(strings::name.eq_any(chunk))
             .select((strings::id, strings::name))
             .load::<(i32, String)>(conn)
             .context(format!("Failed to query strings"))?;
+        let t = Instant::now() - t0;
+        update_metrics(|metrics| {
+            metrics.sql_strings_query_count_in += chunk.len();
+            metrics.sql_strings_query_count_out += rows.len();
+            metrics.sql_strings_query_time += t;
+        })?;
         for (string_id, string_name) in rows {
             match strings.take(string_name.as_str()) {
                 Some(t) => mappings.insert(t, string_id),
@@ -175,6 +184,7 @@ fn persist_strings<'a>(
     let mut mappings: HashMap<&'a str, i32> = HashMap::with_capacity(strings.len());
     query_strings(conn, &mut strings, &mut mappings)?;
     if !strings.is_empty() {
+        let t0 = Instant::now();
         diesel::insert_into(strings::table)
             .values(strings
                 .iter()
@@ -182,6 +192,11 @@ fn persist_strings<'a>(
                 .collect::<Vec<_>>())
             .execute(conn)
             .context("Failed to insert strings")?;
+        let t = Instant::now() - t0;
+        update_metrics(|metrics| {
+            metrics.sql_strings_insert_count += strings.len();
+            metrics.sql_strings_insert_time += t;
+        })?;
         query_strings(conn, &mut strings, &mut mappings)?;
         if !strings.is_empty() {
             bail!("Failed to persist all strings");

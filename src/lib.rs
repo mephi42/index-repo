@@ -14,6 +14,7 @@ pub mod decoders;
 pub mod fs;
 pub mod hashes;
 pub mod http;
+pub mod metrics;
 pub mod models;
 pub mod repomd;
 pub mod rpm;
