@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bytes::buf::Buf;
 use clap::{app_from_crate, Arg, crate_authors, crate_description, crate_name, crate_version};
@@ -28,6 +29,7 @@ use index_repo::errors::FutureExt;
 use index_repo::fs::create_file_all;
 use index_repo::hashes;
 use index_repo::http;
+use index_repo::metrics::update_metrics;
 use index_repo::models::*;
 use index_repo::repomd;
 use index_repo::rpm;
@@ -73,6 +75,27 @@ async fn fetch_file<'a>(
     Ok(path)
 }
 
+fn with_connection<F: FnOnce(&SqliteConnection) -> Result<T, Error>, T>(
+    conn: &Mutex<SqliteConnection>,
+    f: F,
+) -> Result<T, Error> {
+    let t0 = Instant::now();
+    let guard = conn.lock()
+        .map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
+    let t = Instant::now() - t0;
+    update_metrics(|metrics| {
+        metrics.sql_mutex_acquisition_count += 1;
+        metrics.sql_mutex_acquisition_time += t;
+    })?;
+    let t0 = Instant::now();
+    let result = f(&guard)?;
+    let t = Instant::now() - t0;
+    update_metrics(|metrics| {
+        metrics.sql_mutex_hold_time += t;
+    })?;
+    Ok(result)
+}
+
 async fn index_elf_file(
     conn: &Mutex<SqliteConnection>,
     file_id: i32,
@@ -85,20 +108,20 @@ async fn index_elf_file(
         _ => return Ok(()), // ignore errors - peek() could have been mistaken
     };
     await!(index_repo::tokio::blocking(|| {
-        let conn = &*conn.lock()
-            .map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
-        conn.transaction(|| -> Result<(), Error> {
-            db::persist_elf_symbols(conn, file_id, elf.dynsyms
-                .iter()
-                .flat_map(|sym| match elf.dynstrtab.get(sym.st_name) {
-                    Some(Ok(name)) =>
-                        Some((name, sym.st_info as i32, sym.st_other as i32)),
-                    _ => {
-                        warn!("Could not resolve an ELF symbol name");
-                        None
-                    }
-                })
-                .collect::<Vec<_>>())
+        with_connection(conn, |conn| {
+            conn.transaction(|| -> Result<(), Error> {
+                db::persist_elf_symbols(&conn, file_id, elf.dynsyms
+                    .iter()
+                    .flat_map(|sym| match elf.dynstrtab.get(sym.st_name) {
+                        Some(Ok(name)) =>
+                            Some((name, sym.st_info as i32, sym.st_other as i32)),
+                        _ => {
+                            warn!("Could not resolve an ELF symbol name");
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>())
+            })
         })
     }))?;
     Ok(())
@@ -111,9 +134,9 @@ async fn index_file<'a>(
     mut file: File,
 ) -> Result<(), Error> {
     let file_id = await!(index_repo::tokio::blocking(|| {
-        let conn = &*conn.lock()
-            .map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
-        db::persist_file(conn, package_id, name)
+        with_connection(conn, |conn| {
+            db::persist_file(&conn, package_id, name)
+        })
     }))?;
     match goblin::peek(&mut file) {
         Ok(goblin::Hint::Elf(_)) => await!(index_elf_file(conn, file_id, file)),
@@ -144,9 +167,9 @@ async fn index_package(
     let file = await_old!(tokio::fs::File::open(path.clone())
         .with_context(move |_| format!("Could not open {:?}", path)))?;
     let package_id = await!(index_repo::tokio::blocking(|| {
-        let conn = &*conn.lock()
-            .map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
-        db::persist_package(conn, repo_id, &p)
+        with_connection(&conn, |conn| {
+            db::persist_package(conn, repo_id, &p)
+        })
     }))?;
     let (mut a, _pos, _lead, _signature_header, _header) = await!(rpm::read_all_headers(file))?;
     let mut pos = 0;

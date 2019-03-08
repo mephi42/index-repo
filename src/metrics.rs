@@ -12,6 +12,9 @@ use tokio_timer::sleep;
 pub struct Metrics {
     pub sql_files_insert_count: usize,
     pub sql_files_insert_time: Duration,
+    pub sql_mutex_acquisition_count: usize,
+    pub sql_mutex_acquisition_time: Duration,
+    pub sql_mutex_hold_time: Duration,
     pub sql_packages_insert_count: usize,
     pub sql_packages_insert_time: Duration,
     pub sql_strings_insert_count: usize,
@@ -64,6 +67,9 @@ pub async fn monitor() -> Result<(), Error> {
             (
                 sql_files_insert_count,
                 sql_files_insert_time,
+                sql_mutex_acquisition_count,
+                sql_mutex_acquisition_time,
+                sql_mutex_hold_time,
                 sql_packages_insert_count,
                 sql_packages_insert_time,
                 sql_strings_insert_count,
