@@ -10,6 +10,10 @@ use tokio_timer::sleep;
 
 #[derive(Clone, Default)]
 pub struct Metrics {
+    pub sql_files_insert_count: usize,
+    pub sql_files_insert_time: Duration,
+    pub sql_packages_insert_count: usize,
+    pub sql_packages_insert_time: Duration,
     pub sql_strings_insert_count: usize,
     pub sql_strings_insert_time: Duration,
     pub sql_strings_query_count_in: usize,
@@ -54,16 +58,20 @@ pub async fn monitor() -> Result<(), Error> {
             .lock()
             .map_err(|_| format_err!("Failed to lock metrics"))?
             .clone();
-        handle_metrics![
+        handle_metrics!(
             last,
             current,
             (
+                sql_files_insert_count,
+                sql_files_insert_time,
+                sql_packages_insert_count,
+                sql_packages_insert_time,
                 sql_strings_insert_count,
                 sql_strings_insert_time,
                 sql_strings_query_count_in,
                 sql_strings_query_count_out,
                 sql_strings_query_time,
-            )];
+            ));
         last = current;
         await_old!(sleep(Duration::from_secs(5)))?;
     }

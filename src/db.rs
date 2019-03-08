@@ -100,7 +100,7 @@ pub fn persist_repo(
     repo_uri: &str,
     primary_db_data: &repomd::Data,
 ) -> Result<i32, Error> {
-    insert_into_returning_rowid![
+    insert_into_returning_rowid!(
         conn,
         repos::table,
         repos::id,
@@ -108,7 +108,7 @@ pub fn persist_repo(
         (
             repos::uri.eq(repo_uri),
             repos::primary_db.eq(&primary_db_data.location.href),
-        )]
+        ))
 }
 
 pub fn persist_package(
@@ -116,7 +116,8 @@ pub fn persist_package(
     repo_id: i32,
     p: &RpmPackage,
 ) -> Result<i32, Error> {
-    insert_into_returning_rowid![
+    let t0 = Instant::now();
+    let package_id = insert_into_returning_rowid!(
         conn,
         packages::table,
         packages::id,
@@ -128,7 +129,13 @@ pub fn persist_package(
             packages::version.eq(&p.version),
             packages::epoch.eq(&p.epoch),
             packages::release.eq(&p.release),
-        )]
+        ))?;
+    let t = Instant::now() - t0;
+    update_metrics(|metrics| {
+        metrics.sql_packages_insert_count += 1;
+        metrics.sql_packages_insert_time += t;
+    })?;
+    Ok(package_id)
 }
 
 pub fn persist_file(
@@ -136,7 +143,8 @@ pub fn persist_file(
     package_id: i32,
     name: &str,
 ) -> Result<i32, Error> {
-    insert_into_returning_rowid![
+    let t0 = Instant::now();
+    let file_id = insert_into_returning_rowid!(
         conn,
         files::table,
         files::id,
@@ -144,7 +152,13 @@ pub fn persist_file(
         (
             files::package_id.eq(package_id),
             files::name.eq(name),
-        )]
+        ))?;
+    let t = Instant::now() - t0;
+    update_metrics(|metrics| {
+        metrics.sql_files_insert_count += 1;
+        metrics.sql_files_insert_time += t;
+    })?;
+    Ok(file_id)
 }
 
 fn query_strings<'a>(
