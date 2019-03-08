@@ -145,32 +145,43 @@ pub fn persist_file(
         )]
 }
 
-fn persist_strings<'a>(
+fn query_strings<'a>(
     conn: &SqliteConnection,
-    mut strings: HashSet<&'a str>,
-) -> Result<HashMap<&'a str, i32>, Error> {
+    strings: &mut HashSet<&'a str>,
+    mappings: &mut HashMap<&'a str, i32>,
+) -> Result<(), Error> {
     let rows = strings::table
-        .filter(strings::name.eq_any(&strings))
+        .filter(strings::name.eq_any(strings.iter()))
         .select((strings::id, strings::name))
         .load::<(i32, String)>(conn)
         .context(format!("Failed to query strings"))?;
-    let mut mappings: HashMap<&'a str, i32> = HashMap::with_capacity(strings.len());
     for (string_id, string_name) in rows {
         match strings.take(string_name.as_str()) {
             Some(t) => mappings.insert(t, string_id),
             None => bail!("Query has returned an unknown string"),
         };
     }
-    for string in strings {
-        let string_id = insert_into_returning_rowid![
-            conn,
-            strings::table,
-            strings::id,
-            "a string",
-            (
-                strings::name.eq(string),
-            )]?;
-        mappings.insert(string, string_id);
+    Ok(())
+}
+
+fn persist_strings<'a>(
+    conn: &SqliteConnection,
+    mut strings: HashSet<&'a str>,
+) -> Result<HashMap<&'a str, i32>, Error> {
+    let mut mappings: HashMap<&'a str, i32> = HashMap::with_capacity(strings.len());
+    query_strings(conn, &mut strings, &mut mappings)?;
+    if !strings.is_empty() {
+        diesel::insert_into(strings::table)
+            .values(strings
+                .iter()
+                .map(|string| strings::name.eq(string))
+                .collect::<Vec<_>>())
+            .execute(conn)
+            .context("Failed to insert strings")?;
+        query_strings(conn, &mut strings, &mut mappings)?;
+        if !strings.is_empty() {
+            bail!("Failed to persist all strings");
+        }
     }
     Ok(mappings)
 }
