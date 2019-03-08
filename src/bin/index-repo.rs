@@ -153,7 +153,7 @@ async fn index_package(
         };
         debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
         if let Err(e) = index_file(&conn, package_id, &cpio_name, cpio_data) {
-            warn!("{}", e);
+            warn!("{}", index_repo::errors::format(&e));
         }
         a = local_a;
         pos = local_pos;

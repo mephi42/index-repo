@@ -193,20 +193,22 @@ pub fn persist_elf_symbols(
 ) -> Result<(), Error> {
     let strings: HashSet<&str> = HashSet::from_iter(symbols.iter().map(|x| x.0));
     let mappings = persist_strings(conn, strings)?;
-    for (name, st_info, st_other) in symbols {
-        let name_id = match mappings.get(name) {
-            Some(t) => *t,
-            None => bail!("persist_strings() has returned an unknown string"),
-        };
-        diesel::insert_into(elf_symbols::table)
-            .values((
-                elf_symbols::file_id.eq(file_id),
-                elf_symbols::name_id.eq(name_id),
-                elf_symbols::st_info.eq(st_info),
-                elf_symbols::st_other.eq(st_other),
-            ))
-            .execute(conn)
-            .context("Failed to insert an ELF symbol")?;
-    }
+    diesel::insert_into(elf_symbols::table)
+        .values(symbols
+            .iter()
+            .map(|(name, st_info, st_other)| {
+                match mappings.get(name) {
+                    Some(name_id) => Ok((
+                        elf_symbols::file_id.eq(file_id),
+                        elf_symbols::name_id.eq(*name_id),
+                        elf_symbols::st_info.eq(st_info),
+                        elf_symbols::st_other.eq(st_other),
+                    )),
+                    None => Err(format_err!("persist_strings() has returned an unknown string")),
+                }
+            })
+            .collect::<Result<Vec<_>, Error>>()?)
+        .execute(conn)
+        .context("Failed to insert ELF symbols")?;
     Ok(())
 }
