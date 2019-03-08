@@ -150,16 +150,20 @@ fn query_strings<'a>(
     strings: &mut HashSet<&'a str>,
     mappings: &mut HashMap<&'a str, i32>,
 ) -> Result<(), Error> {
-    let rows = strings::table
-        .filter(strings::name.eq_any(strings.iter()))
-        .select((strings::id, strings::name))
-        .load::<(i32, String)>(conn)
-        .context(format!("Failed to query strings"))?;
-    for (string_id, string_name) in rows {
-        match strings.take(string_name.as_str()) {
-            Some(t) => mappings.insert(t, string_id),
-            None => bail!("Query has returned an unknown string"),
-        };
+    let sqlite_max_variable_number = 999;
+    let strings_vec: Vec<&'a str> = Vec::from_iter(strings.iter().map(|s| *s));
+    for chunk in strings_vec.chunks(sqlite_max_variable_number).into_iter() {
+        let rows = strings::table
+            .filter(strings::name.eq_any(chunk))
+            .select((strings::id, strings::name))
+            .load::<(i32, String)>(conn)
+            .context(format!("Failed to query strings"))?;
+        for (string_id, string_name) in rows {
+            match strings.take(string_name.as_str()) {
+                Some(t) => mappings.insert(t, string_id),
+                None => bail!("Query has returned an unknown string"),
+            };
+        }
     }
     Ok(())
 }
