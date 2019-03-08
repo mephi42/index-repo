@@ -50,7 +50,6 @@ pub async fn monitor() -> Result<(), Error> {
         .map_err(|_| format_err!("Failed to lock metrics"))?
         .clone();
     loop {
-        await_old!(sleep(Duration::from_secs(5)))?;
         let current = METRICS
             .lock()
             .map_err(|_| format_err!("Failed to lock metrics"))?
@@ -66,5 +65,6 @@ pub async fn monitor() -> Result<(), Error> {
                 sql_strings_query_time,
             )];
         last = current;
+        await_old!(sleep(Duration::from_secs(5)))?;
     }
 }
