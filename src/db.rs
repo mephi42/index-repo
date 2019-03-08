@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
 use std::path::Path;
 
 use diesel::dsl::exists;
@@ -85,7 +87,7 @@ macro_rules! insert_into_returning_rowid {
             .load::<i32>($conn)
             .context(format!("Failed to query {}", $desc))?;
         match rows.as_slice() {
-            [rowid] => Ok(*rowid),
+            [rowid] => Ok::<i32, Error>(*rowid),
             _ => bail!("Could not find {}", $desc),
         }
     }}
@@ -143,50 +145,57 @@ pub fn persist_file(
         )]
 }
 
-fn persist_string(
+fn persist_strings<'a>(
     conn: &SqliteConnection,
-    s: &str,
-) -> Result<i32, Error> {
-    let query = strings::table
-        .filter(strings::name.eq(s))
-        .select(strings::id)
-        .limit(1);
-    let rows = query
-        .load::<i32>(conn)
-        .context(format!("Failed to query a string"))?;
-    match rows.as_slice() {
-        [rowid] => Ok(*rowid),
-        [] => {
-            insert_into_returning_rowid![
-                conn,
-                strings::table,
-                strings::id,
-                "a string",
-                (strings::name.eq(s))]
-        }
-        _ => unreachable!(),
+    mut strings: HashSet<&'a str>,
+) -> Result<HashMap<&'a str, i32>, Error> {
+    let rows = strings::table
+        .filter(strings::name.eq_any(&strings))
+        .select((strings::id, strings::name))
+        .load::<(i32, String)>(conn)
+        .context(format!("Failed to query strings"))?;
+    let mut mappings: HashMap<&'a str, i32> = HashMap::with_capacity(strings.len());
+    for (string_id, string_name) in rows {
+        match strings.take(string_name.as_str()) {
+            Some(t) => mappings.insert(t, string_id),
+            None => bail!("Query has returned an unknown string"),
+        };
     }
+    for string in strings {
+        let string_id = insert_into_returning_rowid![
+            conn,
+            strings::table,
+            strings::id,
+            "a string",
+            (
+                strings::name.eq(string),
+            )]?;
+        mappings.insert(string, string_id);
+    }
+    Ok(mappings)
 }
 
-pub fn persist_elf_symbol(
+pub fn persist_elf_symbols(
     conn: &SqliteConnection,
     file_id: i32,
-    strtab: &goblin::strtab::Strtab,
-    sym: &goblin::elf::Sym,
-) -> Result<i32, Error> {
-    let name = strtab.get(sym.st_name)
-        .ok_or_else(|| format_err!(
-        "Failed to resolve an ELF symbol name (st_name={:x})", sym.st_name))??;
-    let name_id = persist_string(conn, name)?;
-    insert_into_returning_rowid![
-        conn,
-        elf_symbols::table,
-        elf_symbols::id,
-        "an ELF symbol",
-        (
-            elf_symbols::file_id.eq(file_id),
-            elf_symbols::name_id.eq(name_id),
-            elf_symbols::st_info.eq(sym.st_info as i32),
-            elf_symbols::st_other.eq(sym.st_other as i32),
-        )]
+    symbols: Vec<(&str, i32, i32)>,
+) -> Result<(), Error> {
+    let strings: HashSet<&str> = HashSet::from_iter(symbols.iter().map(|x| x.0));
+    let mappings = persist_strings(conn, strings)?;
+    for (name, st_info, st_other) in symbols {
+        let name_id = match mappings.get(name) {
+            Some(t) => *t,
+            None => bail!("persist_strings() has returned an unknown string"),
+        };
+        diesel::insert_into(elf_symbols::table)
+            .values((
+                elf_symbols::file_id.eq(file_id),
+                elf_symbols::name_id.eq(name_id),
+                elf_symbols::st_info.eq(st_info),
+                elf_symbols::st_other.eq(st_other),
+            ))
+            .execute(conn)
+            .context("Failed to insert an ELF symbol")?;
+    }
+    Ok(())
 }

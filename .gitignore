@@ -3,4 +3,5 @@
 /target/
 Packages/
 index.sqlite
+index.sqlite-journal
 repodata/

@@ -86,16 +86,17 @@ fn index_elf_file(
     };
     let conn = &*conn.lock().map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
     conn.transaction(|| -> Result<(), Error> {
-        for sym in elf.dynsyms.iter() {
-            let _symbol_id = match db::persist_elf_symbol(conn, file_id, &elf.dynstrtab, &sym) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!("{}", index_repo::errors::format(&e));
-                    continue;
+        db::persist_elf_symbols(conn, file_id, elf.dynsyms
+            .iter()
+            .flat_map(|sym| match elf.dynstrtab.get(sym.st_name) {
+                Some(Ok(name)) =>
+                    Some((name, sym.st_info as i32, sym.st_other as i32)),
+                _ => {
+                    warn!("Could not resolve an ELF symbol name");
+                    None
                 }
-            };
-        }
-        Ok(())
+            })
+            .collect::<Vec<_>>())
     })?;
     Ok(())
 }
