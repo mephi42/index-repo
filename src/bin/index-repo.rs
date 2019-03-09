@@ -107,20 +107,21 @@ async fn index_elf_file(
         Ok(goblin::Object::Elf(t)) => t,
         _ => return Ok(()), // ignore errors - peek() could have been mistaken
     };
+    let elf_symbols = elf.dynsyms
+        .iter()
+        .flat_map(|sym| match elf.dynstrtab.get(sym.st_name) {
+            Some(Ok(name)) =>
+                Some((name, sym.st_info as i32, sym.st_other as i32)),
+            _ => {
+                warn!("Could not resolve an ELF symbol name");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
     await!(index_repo::tokio::blocking(|| {
         with_connection(conn, |conn| {
             conn.transaction(|| -> Result<(), Error> {
-                db::persist_elf_symbols(&conn, file_id, elf.dynsyms
-                    .iter()
-                    .flat_map(|sym| match elf.dynstrtab.get(sym.st_name) {
-                        Some(Ok(name)) =>
-                            Some((name, sym.st_info as i32, sym.st_other as i32)),
-                        _ => {
-                            warn!("Could not resolve an ELF symbol name");
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>())
+                db::persist_elf_symbols(&conn, file_id, elf_symbols)
             })
         })
     }))?;
