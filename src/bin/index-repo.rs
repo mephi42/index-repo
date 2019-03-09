@@ -174,7 +174,7 @@ async fn index_package(
         let (local_a, local_pos, entry) = await!(cpio::read_entry(a, pos))?;
         let (_cpio_header, cpio_name, cpio_data) = match entry {
             Some(t) => t,
-            None => break Ok(()),
+            None => break,
         };
         debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
         if let Err(e) = await!(index_file(&conn, package_id, &cpio_name, cpio_data)) {
@@ -183,6 +183,11 @@ async fn index_package(
         a = local_a;
         pos = local_pos;
     }
+    update_metrics(|metrics| {
+        metrics.indexed_packages_count += 1;
+        metrics.indexed_packages_size.v += p.size_package as u64;
+    })?;
+    Ok(())
 }
 
 async fn index_repo(
@@ -218,8 +223,11 @@ async fn index_repo(
         open_checksum))?;
     info!("Reading package lists...");
     let packages = db::get_packages(&primary_db_path, &arches, &requirements)?;
-    let packages_size: i64 = packages.iter().map(|p| p.size_package as i64).sum();
-    info!("Total size of RPMs: {}", pretty_bytes::converter::convert(packages_size as f64));
+    let packages_size: u64 = packages.iter().map(|p| p.size_package as u64).sum();
+    update_metrics(|metrics| {
+        metrics.total_packages_count += packages.len();
+        metrics.total_packages_size.v += packages_size;
+    })?;
     let conn = Arc::new(Mutex::new(conn));
     let index_packages = join_all(packages
         .into_iter()

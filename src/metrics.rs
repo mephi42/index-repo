@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::ops::Sub;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -9,7 +9,30 @@ use log::info;
 use tokio_timer::sleep;
 
 #[derive(Clone, Default)]
+pub struct Size {
+    pub v: u64,
+}
+
+impl Sub for Size {
+    type Output = Size;
+
+    fn sub(self, rhs: Size) -> Self::Output {
+        Size {
+            v: self.v - rhs.v,
+        }
+    }
+}
+
+impl Debug for Size {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "{}", pretty_bytes::converter::convert(self.v as f64))
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct Metrics {
+    pub indexed_packages_count: usize,
+    pub indexed_packages_size: Size,
     pub sql_files_insert_count: usize,
     pub sql_files_insert_time: Duration,
     pub sql_mutex_acquisition_count: usize,
@@ -24,6 +47,8 @@ pub struct Metrics {
     pub sql_strings_query_time: Duration,
     pub sql_symbols_insert_count: usize,
     pub sql_symbols_insert_time: Duration,
+    pub total_packages_count: usize,
+    pub total_packages_size: Size,
 }
 
 lazy_static! {
@@ -67,6 +92,8 @@ pub async fn monitor() -> Result<(), Error> {
             last,
             current,
             (
+                indexed_packages_count,
+                indexed_packages_size,
                 sql_files_insert_count,
                 sql_files_insert_time,
                 sql_mutex_acquisition_count,
@@ -81,6 +108,8 @@ pub async fn monitor() -> Result<(), Error> {
                 sql_strings_query_time,
                 sql_symbols_insert_count,
                 sql_symbols_insert_time,
+                total_packages_count,
+                total_packages_size,
             ));
         last = current;
         await_old!(sleep(Duration::from_secs(5)))?;
