@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::ops::Sub;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use failure::{Error, format_err};
 use lazy_static::lazy_static;
@@ -51,15 +51,25 @@ pub struct Metrics {
     pub total_packages_size: Size,
 }
 
+struct State {
+    t0: Instant,
+    last: Metrics,
+    current: Metrics,
+}
+
 lazy_static! {
-    static ref METRICS: Mutex<Metrics> = Mutex::new(Metrics::default());
+    static ref STATE: Mutex<State> = Mutex::new(State {
+        t0: Instant::now(),
+        last: Metrics::default(),
+        current: Metrics::default(),
+    });
 }
 
 pub fn update_metrics<F: FnOnce(&mut Metrics) -> ()>(f: F) -> Result<(), Error> {
-    let mut metrics = METRICS
+    let mut state = STATE
         .lock()
         .map_err(|_| format_err!("Failed to lock metrics"))?;
-    Ok(f(&mut metrics))
+    Ok(f(&mut state.current))
 }
 
 fn handle_metric<T: Clone + Debug + Sub<Output=T>>(
@@ -78,17 +88,18 @@ macro_rules! handle_metrics {
     }}
 }
 
-pub async fn monitor() -> Result<(), Error> {
-    let mut last = METRICS
-        .lock()
-        .map_err(|_| format_err!("Failed to lock metrics"))?
-        .clone();
-    loop {
-        let current = METRICS
+pub fn log_metrics() -> Result<(), Error> {
+    let (last, current) = {
+        let mut state = STATE
             .lock()
-            .map_err(|_| format_err!("Failed to lock metrics"))?
-            .clone();
-        handle_metrics!(
+            .map_err(|_| format_err!("Failed to lock metrics"))?;
+        info!("Elapsed: {:?}", Instant::now() - state.t0);
+        let last = state.last.clone();
+        let current = state.current.clone();
+        state.last = state.current.clone();
+        (last, current)
+    };
+    handle_metrics!(
             last,
             current,
             (
@@ -111,7 +122,12 @@ pub async fn monitor() -> Result<(), Error> {
                 total_packages_count,
                 total_packages_size,
             ));
-        last = current;
+    Ok(())
+}
+
+pub async fn monitor_metrics() -> Result<(), Error> {
+    loop {
+        log_metrics()?;
         await_old!(sleep(Duration::from_secs(5)))?;
     }
 }

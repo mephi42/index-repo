@@ -29,7 +29,7 @@ use index_repo::errors::FutureExt;
 use index_repo::fs::create_file_all;
 use index_repo::hashes;
 use index_repo::http;
-use index_repo::metrics::update_metrics;
+use index_repo::metrics::{log_metrics, monitor_metrics, update_metrics};
 use index_repo::models::*;
 use index_repo::repomd;
 use index_repo::rpm;
@@ -295,12 +295,14 @@ async fn bootstrap() -> Result<(), Error> {
     run_pending_migrations(&conn)
         .context("run_pending_migrations() failed")?;
     let client = http::make_client()?;
-    let monitor = tokio_async_await::compat::backward::Compat::new(
-        index_repo::metrics::monitor());
-    tokio::spawn(monitor.map_err(|e| {
-        warn!("{}", index_repo::errors::format(&e));
-    }));
-    await!(index_repo(conn, client, repo_uri.to_owned(), arches, requirements, jobs))
+    let metrics_monitor = tokio::spawn(
+        tokio_async_await::compat::backward::Compat::new(monitor_metrics())
+            .map_err(|e| {
+                warn!("{}", index_repo::errors::format(&e));
+            }));
+    await!(index_repo(conn, client, repo_uri.to_owned(), arches, requirements, jobs))?;
+    log_metrics()?;
+    Ok(())
 }
 
 fn main() -> Result<(), Error> {
