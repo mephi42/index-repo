@@ -8,7 +8,7 @@ use failure::{Error, format_err, ResultExt};
 use nom::{apply, do_parse, error_position, named, tag, take};
 use tempfile::tempfile;
 use tokio_io::AsyncRead;
-use tokio_io::io::read_exact;
+use tokio_io::io::{read_exact, Window};
 
 use crate::errors::FutureExt;
 
@@ -110,17 +110,17 @@ pub async fn read_entry<A: AsyncRead + Send + 'static>(
     }
     let mut tmp = tempfile()?;
     let mut remaining = header.c_filesize as usize;
-    let mut buf = vec![0u8; 8192];
+    let mut window = Window::new(vec![0u8; 8192]);
     while remaining > 0 {
-        if remaining < buf.len() {
-            buf.truncate(remaining);
+        if remaining < window.end() {
+            window.set_end(remaining);
         }
-        let (local_a, local_buf, n) = await_old!(tokio_io::io::read(a, buf))?;
-        tmp.write_all(&local_buf[0..n])?;
+        let (local_a, local_window, n) = await_old!(tokio_io::io::read(a, window))?;
+        tmp.write_all(&local_window.get_ref()[0..n])?;
         remaining -= n;
         pos += n;
         a = local_a;
-        buf = local_buf;
+        window = local_window;
     }
     tmp.seek(SeekFrom::Start(0))?;
     let padding = ((pos + 3) & !3) - pos;
