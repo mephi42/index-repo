@@ -22,6 +22,8 @@ pub struct Metrics {
     pub sql_strings_query_count_in: usize,
     pub sql_strings_query_count_out: usize,
     pub sql_strings_query_time: Duration,
+    pub sql_symbols_insert_count: usize,
+    pub sql_symbols_insert_time: Duration,
 }
 
 lazy_static! {
@@ -77,6 +79,8 @@ pub async fn monitor() -> Result<(), Error> {
                 sql_strings_query_count_in,
                 sql_strings_query_count_out,
                 sql_strings_query_time,
+                sql_symbols_insert_count,
+                sql_symbols_insert_time,
             ));
         last = current;
         await_old!(sleep(Duration::from_secs(5)))?;

@@ -228,22 +228,30 @@ pub fn persist_elf_symbols(
     let file_id = persist_file(conn, package_id, file_name)?;
     let strings: HashSet<&str> = HashSet::from_iter(symbols.iter().map(|x| x.0));
     let mappings = persist_strings(conn, strings)?;
+    let symbols_values = symbols
+        .into_iter()
+        .map(|(name, st_info, st_other)| {
+            match mappings.get(name) {
+                Some(name_id) => Ok((
+                    elf_symbols::file_id.eq(file_id),
+                    elf_symbols::name_id.eq(*name_id),
+                    elf_symbols::st_info.eq(st_info),
+                    elf_symbols::st_other.eq(st_other),
+                )),
+                None => Err(format_err!("persist_strings() has returned an unknown string")),
+            }
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let count = symbols_values.len();
+    let t0 = Instant::now();
     diesel::insert_into(elf_symbols::table)
-        .values(symbols
-            .iter()
-            .map(|(name, st_info, st_other)| {
-                match mappings.get(name) {
-                    Some(name_id) => Ok((
-                        elf_symbols::file_id.eq(file_id),
-                        elf_symbols::name_id.eq(*name_id),
-                        elf_symbols::st_info.eq(st_info),
-                        elf_symbols::st_other.eq(st_other),
-                    )),
-                    None => Err(format_err!("persist_strings() has returned an unknown string")),
-                }
-            })
-            .collect::<Result<Vec<_>, Error>>()?)
+        .values(symbols_values)
         .execute(conn)
         .context("Failed to insert ELF symbols")?;
+    let t = Instant::now() - t0;
+    update_metrics(|metrics| {
+        metrics.sql_symbols_insert_count += count;
+        metrics.sql_symbols_insert_time += t;
+    })?;
     Ok(())
 }
