@@ -221,9 +221,11 @@ fn persist_strings<'a>(
 
 pub fn persist_elf_symbols(
     conn: &SqliteConnection,
-    file_id: i32,
+    package_id: i32,
+    file_name: &str,
     symbols: Vec<(&str, i32, i32)>,
 ) -> Result<(), Error> {
+    let file_id = persist_file(conn, package_id, file_name)?;
     let strings: HashSet<&str> = HashSet::from_iter(symbols.iter().map(|x| x.0));
     let mappings = persist_strings(conn, strings)?;
     diesel::insert_into(elf_symbols::table)

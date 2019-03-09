@@ -96,9 +96,10 @@ fn with_connection<F: FnOnce(&SqliteConnection) -> Result<T, Error>, T>(
     Ok(result)
 }
 
-async fn index_elf_file(
-    conn: &Mutex<SqliteConnection>,
-    file_id: i32,
+async fn index_elf_file<'a>(
+    conn: &'a Mutex<SqliteConnection>,
+    package_id: i32,
+    name: &'a str,
     mut file: File,
 ) -> Result<(), Error> {
     let mut elf_bytes = Vec::new();
@@ -121,7 +122,7 @@ async fn index_elf_file(
     await!(index_repo::tokio::blocking(|| {
         with_connection(conn, |conn| {
             conn.transaction(|| -> Result<(), Error> {
-                db::persist_elf_symbols(&conn, file_id, elf_symbols)
+                db::persist_elf_symbols(&conn, package_id, name, elf_symbols)
             })
         })
     }))?;
@@ -134,13 +135,8 @@ async fn index_file<'a>(
     name: &'a str,
     mut file: File,
 ) -> Result<(), Error> {
-    let file_id = await!(index_repo::tokio::blocking(|| {
-        with_connection(conn, |conn| {
-            db::persist_file(&conn, package_id, name)
-        })
-    }))?;
     match goblin::peek(&mut file) {
-        Ok(goblin::Hint::Elf(_)) => await!(index_elf_file(conn, file_id, file)),
+        Ok(goblin::Hint::Elf(_)) => await!(index_elf_file(conn, package_id, name, file)),
         _ => Ok(()),  // ignore errors, because peek() fails on small files
     }
 }
