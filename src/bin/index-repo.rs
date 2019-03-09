@@ -4,12 +4,11 @@
 extern crate index_repo;
 
 use std::env;
-use std::fs::File;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use arrayref::array_ref;
 use bytes::buf::Buf;
 use clap::{app_from_crate, Arg, crate_authors, crate_description, crate_name, crate_version};
 use diesel::prelude::*;
@@ -19,6 +18,7 @@ use failure::{Error, format_err, ResultExt};
 use futures::future::{Future, join_all};
 use futures::Stream;
 use log::{debug, info, warn};
+use tokio::io::AsyncRead;
 use tokio_executor::DefaultExecutor;
 use tokio_sync::semaphore::Semaphore;
 
@@ -100,10 +100,8 @@ async fn index_elf_file<'a>(
     conn: &'a Mutex<SqliteConnection>,
     package_id: i32,
     name: &'a str,
-    mut file: File,
+    elf_bytes: Vec<u8>,
 ) -> Result<(), Error> {
-    let mut elf_bytes = Vec::new();
-    file.read_to_end(&mut elf_bytes)?;
     let elf = match goblin::Object::parse(&elf_bytes) {
         Ok(goblin::Object::Elf(t)) => t,
         _ => return Ok(()), // ignore errors - peek() could have been mistaken
@@ -129,15 +127,28 @@ async fn index_elf_file<'a>(
     Ok(())
 }
 
-async fn index_file<'a>(
-    conn: &'a Mutex<SqliteConnection>,
+async fn index_file<A: AsyncRead + Send + 'static>(
+    conn: &Mutex<SqliteConnection>,
     package_id: i32,
-    name: &'a str,
-    mut file: File,
-) -> Result<(), Error> {
-    match goblin::peek(&mut file) {
-        Ok(goblin::Hint::Elf(_)) => await!(index_elf_file(conn, package_id, name, file)),
-        _ => Ok(()),  // ignore errors, because peek() fails on small files
+    a: A,
+    pos: usize,
+    entry: cpio::Entry,
+) -> Result<(A, usize), Error> {
+    if entry.header.c_filesize < 16 {
+        return Ok((a, pos));
+    }
+    match goblin::peek_bytes(array_ref![entry.peek.get_ref(), 0, 16]) {
+        Ok(goblin::Hint::Elf(_)) => {
+            let (a, pos, elf_bytes) = await!(cpio::read_entry_data(
+                a, pos, entry.header.c_filesize, entry.peek))?;
+            await!(index_elf_file(conn, package_id, &entry.name, elf_bytes))?;
+            Ok((a, pos))
+        }
+        _ => {
+            let (a, pos) = await!(cpio::skip_entry_data(
+                a, pos, entry.header.c_filesize, entry.peek))?;
+            Ok((a, pos))
+        }
     }
 }
 
@@ -171,15 +182,15 @@ async fn index_package(
     let (mut a, _pos, _lead, _signature_header, _header) = await!(rpm::read_all_headers(file))?;
     let mut pos = 0;
     loop {
-        let (local_a, local_pos, entry) = await!(cpio::read_entry(a, pos))?;
-        let (_cpio_header, cpio_name, cpio_data) = match entry {
+        let (local_a, local_pos, entry) = await!(cpio::read_entry_start(a, pos))?;
+        let entry = match entry {
             Some(t) => t,
             None => break,
         };
-        debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &cpio_name);
-        if let Err(e) = await!(index_file(&conn, package_id, &cpio_name, cpio_data)) {
-            warn!("{}", index_repo::errors::format(&e));
-        }
+        debug!("Indexing file {}/{}:{}...", &repo_uri, &p.location_href, &entry.name);
+        let (local_a, local_pos) = await!(index_file(
+            &conn, package_id, local_a, local_pos, entry))?;
+        let (local_a, local_pos) = await!(cpio::read_entry_end(local_a, local_pos))?;
         a = local_a;
         pos = local_pos;
     }

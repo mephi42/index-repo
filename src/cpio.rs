@@ -1,12 +1,9 @@
-use std::fs::File;
-use std::io::{Seek, Write};
-use std::io::SeekFrom;
+use std::cmp::min;
 use std::str::from_utf8;
 use std::u64;
 
 use failure::{Error, format_err, ResultExt};
 use nom::{apply, do_parse, error_position, named, tag, take};
-use tempfile::tempfile;
 use tokio_io::AsyncRead;
 use tokio_io::io::{read_exact, Window};
 
@@ -99,32 +96,64 @@ pub async fn read_name<A: AsyncRead + Send + 'static>(
     Ok((a, pos + size + padding, s))
 }
 
-pub async fn read_entry<A: AsyncRead + Send + 'static>(
+pub struct Entry {
+    pub header: Header,
+    pub name: String,
+    pub peek: Window<Vec<u8>>,
+}
+
+pub async fn read_entry_start<A: AsyncRead + Send + 'static>(
     a: A, pos: usize,
-) -> Result<(A, usize, Option<(Header, String, File)>), Error> {
+) -> Result<(A, usize, Option<Entry>), Error> {
     let (a, pos, header) = await!(read_header(a, pos))?;
     let c_namesize = header.c_namesize as usize;
-    let (mut a, mut pos, name) = await!(read_name(a, pos, c_namesize))?;
+    let (a, pos, name) = await!(read_name(a, pos, c_namesize))?;
     if name == "TRAILER!!!" {
         return Ok((a, pos, None));
     }
-    let mut tmp = tempfile()?;
-    let mut remaining = header.c_filesize as usize;
-    let mut window = Window::new(vec![0u8; 8192]);
+    let size = min(header.c_filesize as usize, 8192);
+    let (a, peek) = await_old!(read_exact(a, Window::new(vec![0u8; size])))?;
+    Ok((a, pos + size, Some(Entry {
+        header,
+        name,
+        peek,
+    })))
+}
+
+pub async fn read_entry_data<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize, c_filesize: u64, peek: Window<Vec<u8>>,
+) -> Result<(A, usize, Vec<u8>), Error> {
+    let c_filesize = c_filesize as usize;
+    let mut data = vec![0u8; c_filesize];
+    let peek_len = peek.end() - peek.start();
+    data[..peek_len].copy_from_slice(peek.as_ref());
+    let mut window = Window::new(data);
+    window.set_start(peek_len);
+    let (a, window) = await_old!(read_exact(a, window))?;
+    Ok((a, pos + (c_filesize - peek_len), window.into_inner()))
+}
+
+pub async fn skip_entry_data<A: AsyncRead + Send + 'static>(
+    mut a: A, mut pos: usize, c_filesize: u64, mut peek: Window<Vec<u8>>,
+) -> Result<(A, usize), Error> {
+    let mut remaining = c_filesize as usize - (peek.end() - peek.start());
     while remaining > 0 {
-        if remaining < window.end() {
-            window.set_end(remaining);
+        if remaining < peek.end() {
+            peek.set_end(remaining);
         }
-        let (local_a, local_window, n) = await_old!(tokio_io::io::read(a, window))?;
-        tmp.write_all(&local_window.get_ref()[0..n])?;
+        let (local_a, local_peek, n) = await_old!(tokio_io::io::read(a, peek))?;
         remaining -= n;
         pos += n;
         a = local_a;
-        window = local_window;
+        peek = local_peek;
     }
-    tmp.seek(SeekFrom::Start(0))?;
+    Ok((a, pos))
+}
+
+pub async fn read_entry_end<A: AsyncRead + Send + 'static>(
+    a: A, pos: usize,
+) -> Result<(A, usize), Error> {
     let padding = ((pos + 3) & !3) - pos;
     let (a, _) = await_old!(tokio_io::io::read_exact(a, vec![0u8; padding]))?;
-    pos += padding;
-    Ok((a, pos, Some((header, name, tmp))))
+    Ok((a, pos + padding))
 }
