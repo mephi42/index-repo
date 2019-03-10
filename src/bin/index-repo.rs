@@ -295,7 +295,7 @@ async fn bootstrap() -> Result<(), Error> {
     run_pending_migrations(&conn)
         .context("run_pending_migrations() failed")?;
     let client = http::make_client()?;
-    let metrics_monitor = tokio::spawn(
+    let _metrics_monitor = tokio::spawn(
         tokio_async_await::compat::backward::Compat::new(monitor_metrics())
             .map_err(|e| {
                 warn!("{}", index_repo::errors::format(&e));

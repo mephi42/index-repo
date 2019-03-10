@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use failure::{Error, format_err};
 use lazy_static::lazy_static;
 use log::info;
+use prettytable::{cell, row, Table};
 use tokio_timer::sleep;
 
 #[derive(Clone, Default)]
@@ -31,6 +32,7 @@ impl Debug for Size {
 
 #[derive(Clone, Default)]
 pub struct Metrics {
+    pub elapsed_time: Duration,
     pub indexed_packages_count: usize,
     pub indexed_packages_size: Size,
     pub sql_files_insert_count: usize,
@@ -73,17 +75,20 @@ pub fn update_metrics<F: FnOnce(&mut Metrics) -> ()>(f: F) -> Result<(), Error> 
 }
 
 fn handle_metric<T: Clone + Debug + Sub<Output=T>>(
-    last: &T, current: &T, name: &str,
+    table: &mut Table, last: &T, current: &T, name: &str,
 ) -> Result<(), Error> {
-    let delta: T = current.clone() - last.clone();
-    info!("{}: {:?} {:?}", name, current, delta);
+    table.add_row(row![
+        name,
+        format!("{:?}", current),
+        format!("{:?}", current.clone() - last.clone()),
+    ]);
     Ok(())
 }
 
 macro_rules! handle_metrics {
-    ($last:expr, $current:expr, ($($metric:ident),* $(,)?)) => {{
+    ($table: expr, $last:expr, $current:expr, ($($metric:ident),* $(,)?)) => {{
         $(
-            handle_metric(&$last.$metric, &$current.$metric, stringify!($metric))?;
+            handle_metric($table, &$last.$metric, &$current.$metric, stringify!($metric))?;
         )*
     }}
 }
@@ -93,16 +98,21 @@ pub fn log_metrics() -> Result<(), Error> {
         let mut state = STATE
             .lock()
             .map_err(|_| format_err!("Failed to lock metrics"))?;
-        info!("Elapsed: {:?}", Instant::now() - state.t0);
+        state.current.elapsed_time = Instant::now() - state.t0;
         let last = state.last.clone();
         let current = state.current.clone();
         state.last = state.current.clone();
         (last, current)
     };
+    let mut table = Table::new();
+    table.set_format(*prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
+    table.set_titles(row!["Metric", "Value", "Delta"]);
     handle_metrics!(
-            last,
-            current,
+            &mut table,
+            &last,
+            &current,
             (
+                elapsed_time,
                 indexed_packages_count,
                 indexed_packages_size,
                 sql_files_insert_count,
@@ -122,6 +132,9 @@ pub fn log_metrics() -> Result<(), Error> {
                 total_packages_count,
                 total_packages_size,
             ));
+    let mut s = Vec::new();
+    table.print(&mut s)?;
+    info!("\n{}", std::str::from_utf8(&s)?);
     Ok(())
 }
 
