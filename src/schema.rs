@@ -19,7 +19,6 @@ table! {
 }
 
 joinable!(packages -> repos (repo_id));
-allow_tables_to_appear_in_same_query!(packages, repos);
 
 table! {
     files (id) {
@@ -30,7 +29,6 @@ table! {
 }
 
 joinable!(files -> packages (package_id));
-allow_tables_to_appear_in_same_query!(files, packages);
 
 table! {
     strings (id) {
@@ -50,9 +48,15 @@ table! {
 }
 
 joinable!(elf_symbols -> files (file_id));
-allow_tables_to_appear_in_same_query!(elf_symbols, files);
 joinable!(elf_symbols -> strings (name_id));
-allow_tables_to_appear_in_same_query!(elf_symbols, strings);
+
+allow_tables_to_appear_in_same_query!(
+    repos,
+    packages,
+    files,
+    strings,
+    elf_symbols,
+);
 
 table! {
     #[sql_name="packages"]

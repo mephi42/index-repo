@@ -3,7 +3,6 @@
 #[macro_use]
 extern crate index_repo;
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -22,6 +21,7 @@ use tokio::io::AsyncRead;
 use tokio_executor::DefaultExecutor;
 use tokio_sync::semaphore::Semaphore;
 
+use index_repo::clap::{database_url_arg, database_url_value};
 use index_repo::cpio;
 use index_repo::db;
 use index_repo::decoders::Decoder;
@@ -261,9 +261,7 @@ async fn index_repo(
 async fn bootstrap() -> Result<(), Error> {
     dotenv().ok();
     let matches = app_from_crate!()
-        .arg(Arg::with_name("DATABASE_URL")
-            .long("database-url")
-            .takes_value(true))
+        .arg(database_url_arg())
         .arg(Arg::with_name("ARCH")
             .long("arch")
             .number_of_values(1)
@@ -280,11 +278,7 @@ async fn bootstrap() -> Result<(), Error> {
             .required(true)
             .index(1))
         .get_matches();
-    let database_url = matches
-        .value_of("DATABASE_URL")
-        .map(std::borrow::ToOwned::to_owned)
-        .or_else(|| { env::var("DATABASE_URL").ok() })
-        .unwrap_or_else(|| "index.sqlite".to_owned());
+    let database_url = database_url_value(&matches);
     let arches = matches.values_of_lossy("ARCH");
     let requirements = matches.values_of_lossy("REQUIRES");
     let jobs = matches.value_of("JOBS").unwrap().parse::<usize>()
