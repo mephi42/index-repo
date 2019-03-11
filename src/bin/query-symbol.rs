@@ -1,7 +1,10 @@
 use std::time::Instant;
 
 use clap::{app_from_crate, Arg, crate_authors, crate_description, crate_name, crate_version};
+use diesel::debug_query;
 use diesel::prelude::*;
+use diesel_migrations::run_pending_migrations;
+use diesel::sqlite::Sqlite;
 use dotenv::dotenv;
 use failure::{Error, ResultExt};
 use prettytable::{cell, row, Table};
@@ -22,13 +25,17 @@ fn main() -> Result<(), Error> {
     let symbols = matches.values_of_lossy("SYMBOL").unwrap();
     let conn = SqliteConnection::establish(&database_url)
         .context(format!("SqliteConnection::establish({}) failed", database_url))?;
+    run_pending_migrations(&conn)
+        .context("run_pending_migrations() failed")?;
     let t0 = Instant::now();
-    let rows = strings::table
+    let query = strings::table
         .inner_join(elf_symbols::table
             .inner_join(files::table
                 .inner_join(packages::table)))
         .filter(strings::name.eq_any(symbols))
-        .select((packages::name, files::name, strings::name))
+        .select((packages::name, files::name, strings::name));
+    println!("sql> {}", debug_query::<Sqlite, _>(&query));
+    let rows = query
         .load::<(String, String, String)>(&conn)
         .context("Failed to query a symbol")?;
     let t = Instant::now() - t0;
