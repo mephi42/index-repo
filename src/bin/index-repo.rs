@@ -110,7 +110,7 @@ async fn index_elf_file<'a>(
         .iter()
         .flat_map(|sym| match elf.dynstrtab.get(sym.st_name) {
             Some(Ok(name)) =>
-                Some((name, sym.st_info as i32, sym.st_other as i32)),
+                Some((name, i32::from(sym.st_info), i32::from(sym.st_other))),
             _ => {
                 warn!("Could not resolve an ELF symbol name");
                 None

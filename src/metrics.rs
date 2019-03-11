@@ -71,7 +71,8 @@ pub fn update_metrics<F: FnOnce(&mut Metrics) -> ()>(f: F) -> Result<(), Error> 
     let mut state = STATE
         .lock()
         .map_err(|_| format_err!("Failed to lock metrics"))?;
-    Ok(f(&mut state.current))
+    f(&mut state.current);
+    Ok(())
 }
 
 fn handle_metric<T: Clone + Debug + Sub<Output=T>>(

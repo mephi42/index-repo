@@ -167,14 +167,14 @@ fn query_strings<'a>(
     mappings: &mut HashMap<&'a str, i32>,
 ) -> Result<(), Error> {
     let sqlite_max_variable_number = 999;
-    let strings_vec: Vec<&'a str> = Vec::from_iter(strings.iter().map(|s| *s));
-    for chunk in strings_vec.chunks(sqlite_max_variable_number).into_iter() {
+    let strings_vec: Vec<&'a str> = Vec::from_iter(strings.iter().cloned());
+    for chunk in strings_vec.chunks(sqlite_max_variable_number) {
         let t0 = Instant::now();
         let rows = strings::table
             .filter(strings::name.eq_any(chunk))
             .select((strings::id, strings::name))
             .load::<(i32, String)>(conn)
-            .context(format!("Failed to query strings"))?;
+            .context("Failed to query strings")?;
         let t = Instant::now() - t0;
         update_metrics(|metrics| {
             metrics.sql_strings_query_count_in += chunk.len();
