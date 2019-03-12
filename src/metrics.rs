@@ -49,6 +49,8 @@ pub struct Metrics {
     pub sql_strings_query_time: Duration,
     pub sql_symbols_insert_count: usize,
     pub sql_symbols_insert_time: Duration,
+    pub strings_hashing_time: Duration,
+    pub symbols_mapping_time: Duration,
     pub total_packages_count: usize,
     pub total_packages_size: Size,
 }
@@ -130,6 +132,8 @@ pub fn log_metrics() -> Result<(), Error> {
                 sql_strings_query_time,
                 sql_symbols_insert_count,
                 sql_symbols_insert_time,
+                strings_hashing_time,
+                symbols_mapping_time,
                 total_packages_count,
                 total_packages_size,
             ));
@@ -144,4 +148,19 @@ pub async fn monitor_metrics() -> Result<(), Error> {
         log_metrics()?;
         await_old!(sleep(Duration::from_secs(5)))?;
     }
+}
+
+pub fn timed<T, F: FnOnce() -> T>(f: F) -> (T, Duration) {
+    let t0 = Instant::now();
+    let result = f();
+    let t = Instant::now() - t0;
+    (result, t)
+}
+
+pub fn timed_result<T, E, F: FnOnce() -> Result<T, E>>(
+    f: F
+) -> Result<(T, Duration), E> {
+    let (result, t) = timed(f);
+    let result = result?;
+    Ok((result, t))
 }

@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::path::Path;
-use std::time::Instant;
 
 use diesel::dsl::exists;
 use diesel::prelude::*;
@@ -11,7 +10,7 @@ use failure::{bail, Error, format_err, ResultExt};
 use itertools::Itertools;
 use smallvec::SmallVec;
 
-use crate::metrics::update_metrics;
+use crate::metrics::{timed, timed_result, update_metrics};
 use crate::models::*;
 use crate::repomd;
 use crate::schema::*;
@@ -116,8 +115,7 @@ pub fn persist_package(
     repo_id: i32,
     p: &RpmPackage,
 ) -> Result<i32, Error> {
-    let t0 = Instant::now();
-    let package_id = insert_into_returning_rowid!(
+    let (package_id, t) = timed_result(|| insert_into_returning_rowid!(
         conn,
         packages::table,
         packages::id,
@@ -129,8 +127,7 @@ pub fn persist_package(
             packages::version.eq(&p.version),
             packages::epoch.eq(&p.epoch),
             packages::release.eq(&p.release),
-        ))?;
-    let t = Instant::now() - t0;
+        )))?;
     update_metrics(|metrics| {
         metrics.sql_packages_insert_count += 1;
         metrics.sql_packages_insert_time += t;
@@ -143,8 +140,7 @@ pub fn persist_file(
     package_id: i32,
     name: &str,
 ) -> Result<i32, Error> {
-    let t0 = Instant::now();
-    let file_id = insert_into_returning_rowid!(
+    let (file_id, t) = timed_result(|| insert_into_returning_rowid!(
         conn,
         files::table,
         files::id,
@@ -152,8 +148,7 @@ pub fn persist_file(
         (
             files::package_id.eq(package_id),
             files::name.eq(name),
-        ))?;
-    let t = Instant::now() - t0;
+        )))?;
     update_metrics(|metrics| {
         metrics.sql_files_insert_count += 1;
         metrics.sql_files_insert_time += t;
@@ -169,13 +164,11 @@ fn query_strings<'a>(
     let sqlite_max_variable_number = 999;
     let strings_vec: Vec<&'a str> = Vec::from_iter(strings.iter().cloned());
     for chunk in strings_vec.chunks(sqlite_max_variable_number) {
-        let t0 = Instant::now();
-        let rows = strings::table
+        let (rows, t) = timed_result(|| strings::table
             .filter(strings::name.eq_any(chunk))
             .select((strings::id, strings::name))
             .load::<(i32, String)>(conn)
-            .context("Failed to query strings")?;
-        let t = Instant::now() - t0;
+            .context("Failed to query strings"))?;
         update_metrics(|metrics| {
             metrics.sql_strings_query_count_in += chunk.len();
             metrics.sql_strings_query_count_out += rows.len();
@@ -198,15 +191,13 @@ fn persist_strings<'a>(
     let mut mappings: HashMap<&'a str, i32> = HashMap::with_capacity(strings.len());
     query_strings(conn, &mut strings, &mut mappings)?;
     if !strings.is_empty() {
-        let t0 = Instant::now();
-        diesel::insert_into(strings::table)
+        let (_, t) = timed_result(|| diesel::insert_into(strings::table)
             .values(strings
                 .iter()
                 .map(|string| strings::name.eq(string))
                 .collect::<Vec<_>>())
             .execute(conn)
-            .context("Failed to insert strings")?;
-        let t = Instant::now() - t0;
+            .context("Failed to insert strings"))?;
         update_metrics(|metrics| {
             metrics.sql_strings_insert_count += strings.len();
             metrics.sql_strings_insert_time += t;
@@ -226,9 +217,14 @@ pub fn persist_elf_symbols(
     symbols: Vec<(&str, i32, i32)>,
 ) -> Result<(), Error> {
     let file_id = persist_file(conn, package_id, file_name)?;
-    let strings: HashSet<&str> = HashSet::from_iter(symbols.iter().map(|x| x.0));
+    let (strings, t): (HashSet<&str>, _) = timed(|| HashSet::from_iter(symbols
+        .iter()
+        .map(|x| x.0)));
+    update_metrics(|metrics| {
+        metrics.strings_hashing_time += t;
+    })?;
     let mappings = persist_strings(conn, strings)?;
-    let symbols_values = symbols
+    let (symbols_values, t) = timed_result(|| symbols
         .into_iter()
         .map(|(name, st_info, st_other)| {
             match mappings.get(name) {
@@ -241,14 +237,15 @@ pub fn persist_elf_symbols(
                 None => Err(format_err!("persist_strings() has returned an unknown string")),
             }
         })
-        .collect::<Result<Vec<_>, Error>>()?;
+        .collect::<Result<Vec<_>, Error>>())?;
+    update_metrics(|metrics| {
+        metrics.symbols_mapping_time += t;
+    })?;
     let count = symbols_values.len();
-    let t0 = Instant::now();
-    diesel::insert_into(elf_symbols::table)
+    let (_, t) = timed_result(|| diesel::insert_into(elf_symbols::table)
         .values(symbols_values)
         .execute(conn)
-        .context("Failed to insert ELF symbols")?;
-    let t = Instant::now() - t0;
+        .context("Failed to insert ELF symbols"))?;
     update_metrics(|metrics| {
         metrics.sql_symbols_insert_count += count;
         metrics.sql_symbols_insert_time += t;

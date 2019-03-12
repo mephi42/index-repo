@@ -5,7 +5,6 @@ extern crate index_repo;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use arrayref::array_ref;
 use bytes::buf::Buf;
@@ -29,7 +28,7 @@ use index_repo::errors::FutureExt;
 use index_repo::fs::create_file_all;
 use index_repo::hashes;
 use index_repo::http;
-use index_repo::metrics::{log_metrics, monitor_metrics, update_metrics};
+use index_repo::metrics::{log_metrics, monitor_metrics, timed_result, update_metrics};
 use index_repo::models::*;
 use index_repo::repomd;
 use index_repo::rpm;
@@ -79,17 +78,13 @@ fn with_connection<F: FnOnce(&SqliteConnection) -> Result<T, Error>, T>(
     conn: &Mutex<SqliteConnection>,
     f: F,
 ) -> Result<T, Error> {
-    let t0 = Instant::now();
-    let guard = conn.lock()
-        .map_err(|_| format_err!("Failed to lock a SqliteConnection"))?;
-    let t = Instant::now() - t0;
+    let (guard, t) = timed_result(|| conn.lock()
+        .map_err(|_| format_err!("Failed to lock a SqliteConnection")))?;
     update_metrics(|metrics| {
         metrics.sql_mutex_acquisition_count += 1;
         metrics.sql_mutex_acquisition_time += t;
     })?;
-    let t0 = Instant::now();
-    let result = f(&guard)?;
-    let t = Instant::now() - t0;
+    let (result, t) = timed_result(|| f(&guard))?;
     update_metrics(|metrics| {
         metrics.sql_mutex_hold_time += t;
     })?;
@@ -286,6 +281,8 @@ async fn bootstrap() -> Result<(), Error> {
     let repo_uri = matches.value_of("URI").unwrap();
     let conn = SqliteConnection::establish(&database_url)
         .context(format!("SqliteConnection::establish({}) failed", database_url))?;
+    let cache_size = 1024 * 1024 * 1024;
+    conn.execute(&format!("PRAGMA cache_size = -{}", cache_size / 1024))?;
     run_pending_migrations(&conn)
         .context("run_pending_migrations() failed")?;
     let client = http::make_client()?;
